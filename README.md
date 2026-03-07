@@ -71,6 +71,20 @@ npm run build && npm start
 
 ### 5. Docker
 
+**Use the pre-built image (recommended):**
+
+```bash
+docker run -d \
+  --name copilot-proxy \
+  -p 6628:6628 \
+  -e GITHUB_TOKEN=ghu_xxxx \
+  -e API_KEY=your-api-key \
+  -v copilot-data:/app/data \
+  ghcr.io/yeaft/copilot-proxy-server:latest
+```
+
+**Or build from source:**
+
 ```bash
 docker build -t copilot-proxy .
 docker run -d \
