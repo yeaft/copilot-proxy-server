@@ -7,7 +7,7 @@
  *
  * 用法:
  *   node scripts/test-api.mjs                          # 使用 .env 配置
- *   node scripts/test-api.mjs https://copilot.yeaft.com  # 指定服务器地址
+ *   node scripts/test-api.mjs https://your-server.com  # 指定服务器地址
  *   API_KEY=xxx node scripts/test-api.mjs              # 通过环境变量传入
  */
 

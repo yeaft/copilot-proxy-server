@@ -1,14 +1,14 @@
 # CopilotProxyServer
 
-A standalone proxy server that exposes GitHub Copilot's LLM capabilities through standard API formats. Supports **OpenAI**, **Anthropic**, and **Google Gemini** compatible endpoints.
+A standalone proxy server that exposes GitHub Copilot's LLM capabilities through multiple standard API formats. Supports **Chat Completions**, **Messages**, and **Gemini-style** compatible endpoints — allowing you to use Copilot-provided models with your existing tools and SDKs.
 
 Run on any server (including headless machines without GUI) via Docker — no VS Code required.
 
 ## Features
 
-- **Multi-format API support** — OpenAI, Anthropic Messages, and Gemini API formats
-- **Automatic format translation** — Anthropic/Gemini requests are transparently converted to/from OpenAI format
-- **Streaming support** — Full SSE streaming for all three API formats
+- **Multi-format API support** — Chat Completions (`/v1/chat/completions`), Messages (`/v1/messages`), and Gemini-style (`/v1beta/models/`) endpoints
+- **Automatic format translation** — Messages and Gemini-style requests are transparently converted to the Copilot wire format
+- **Streaming support** — Full SSE streaming for all API formats
 - **Token management** — Automatic Copilot token refresh, no manual intervention needed
 - **Usage tracking** — Built-in SQLite database tracks requests, tokens, and usage per IP/model
 - **Dashboard** — Web-based usage analytics dashboard with charts
@@ -139,14 +139,14 @@ Returns all available Copilot models. Available models depend on your Copilot su
 
 ---
 
-### OpenAI Chat Completions
+### Chat Completions
 
 ```
 POST /v1/chat/completions
 POST /chat/completions
 ```
 
-Fully compatible with the [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Requests are forwarded directly to the Copilot backend.
+Standard Chat Completions endpoint. Requests are forwarded directly to the Copilot backend.
 
 **Example (non-streaming):**
 
@@ -181,13 +181,13 @@ curl -X POST http://localhost:6628/v1/chat/completions \
 
 ---
 
-### Anthropic Messages
+### Messages
 
 ```
 POST /v1/messages
 ```
 
-Compatible with the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages). Requests are automatically translated to OpenAI format, sent to Copilot, and responses are translated back to Anthropic format.
+Messages-style endpoint. Requests are automatically translated to the Copilot wire format and responses are translated back.
 
 **Example (non-streaming):**
 
@@ -227,23 +227,23 @@ curl -X POST http://localhost:6628/v1/messages \
 
 ---
 
-### Anthropic Token Counting
+### Token Counting (Messages)
 
 ```
 POST /v1/messages/count_tokens
 ```
 
-Estimate the token count for a request.
+Estimate the token count for a Messages-style request.
 
 ---
 
-### Gemini generateContent
+### Gemini-style generateContent
 
 ```
 POST /v1beta/models/{model}:generateContent
 ```
 
-Compatible with the [Google Gemini API](https://ai.google.dev/api/generate-content). Non-streaming.
+Gemini-style content generation endpoint (non-streaming).
 
 **Example:**
 
@@ -269,7 +269,7 @@ curl -X POST http://localhost:6628/v1beta/models/gemini-2.0-flash:generateConten
 
 ---
 
-### Gemini streamGenerateContent
+### Gemini-style streamGenerateContent
 
 ```
 POST /v1beta/models/{model}:streamGenerateContent
@@ -279,13 +279,13 @@ Streaming version of generateContent, returns SSE format.
 
 ---
 
-### Gemini countTokens
+### Gemini-style countTokens
 
 ```
 POST /v1beta/models/{model}:countTokens
 ```
 
-Estimate token count for a Gemini-format request.
+Estimate token count for a Gemini-style request.
 
 ---
 
@@ -313,7 +313,7 @@ export ANTHROPIC_AUTH_TOKEN=YOUR_API_KEY
 export ANTHROPIC_MODEL=claude-sonnet-4-20250514
 ```
 
-### OpenAI SDK (Python)
+### Chat Completions SDK (Python)
 
 ```python
 from openai import OpenAI
@@ -330,7 +330,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-### OpenAI SDK (Node.js)
+### Chat Completions SDK (Node.js)
 
 ```typescript
 import OpenAI from "openai";
@@ -347,7 +347,7 @@ const response = await client.chat.completions.create({
 console.log(response.choices[0].message.content);
 ```
 
-### Anthropic SDK (Python)
+### Messages SDK (Python)
 
 ```python
 import anthropic
@@ -365,7 +365,7 @@ message = client.messages.create(
 print(message.content[0].text)
 ```
 
-### curl (Gemini format)
+### Gemini-style (curl)
 
 ```bash
 curl -X POST http://localhost:6628/v1beta/models/gemini-2.0-flash:generateContent \
@@ -378,17 +378,12 @@ curl -X POST http://localhost:6628/v1beta/models/gemini-2.0-flash:generateConten
 
 ## Available Models
 
-Models are passed directly to the Copilot backend. Use `GET /v1/models` to see all available models for your subscription. Common models include:
-
-- `gpt-4o` / `gpt-4o-mini`
-- `claude-sonnet-4-20250514` / `claude-3.5-sonnet`
-- `gemini-2.0-flash`
-- `o1` / `o3-mini`
+Models are passed directly to the Copilot backend. Use `GET /v1/models` to see all available models for your subscription. The available models depend on your GitHub Copilot plan.
 
 ## Architecture
 
 ```
-Client Request (OpenAI / Anthropic / Gemini format)
+Client Request (Chat Completions / Messages / Gemini-style format)
     │
     ▼
 CopilotProxyServer (Hono, port 6628)
@@ -396,18 +391,18 @@ CopilotProxyServer (Hono, port 6628)
     │  ← Rate limiting
     │  ← Usage logging (SQLite)
     │
-    ├── OpenAI format    → Forward directly
-    ├── Anthropic format → Translate to OpenAI → Response back to Anthropic
-    └── Gemini format    → Translate to OpenAI → Response back to Gemini
+    ├── Chat Completions format  → Forward directly
+    ├── Messages format          → Translate → Response back to Messages format
+    └── Gemini-style format      → Translate → Response back to Gemini-style format
     │
     ▼
-GitHub Copilot API (api.githubcopilot.com)
+GitHub Copilot API
 ```
 
 ## Token Lifecycle
 
 1. **GitHub OAuth Token** (`ghu_...`) — Obtained via Device Flow. Long-lived, valid until manually revoked.
-2. **Copilot Internal Token** — Short-lived, automatically obtained from `api.github.com/copilot_internal/v2/token`. The server refreshes it automatically based on the `refresh_in` field.
+2. **Copilot Internal Token** — Short-lived, automatically refreshed by the server based on the `refresh_in` field.
 
 No manual token management is needed after initial setup.
 
