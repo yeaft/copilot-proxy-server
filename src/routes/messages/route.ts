@@ -1,0 +1,22 @@
+import { Hono } from "hono";
+
+import { forwardError } from "../../lib/error.js";
+import { handleMessagesCompletion, handleCountTokens } from "./handler.js";
+
+export const messageRoutes = new Hono();
+
+messageRoutes.post("/", async (c) => {
+  try {
+    return await handleMessagesCompletion(c);
+  } catch (error) {
+    return await forwardError(c, error);
+  }
+});
+
+messageRoutes.post("/count_tokens", async (c) => {
+  try {
+    return await handleCountTokens(c);
+  } catch (error) {
+    return await forwardError(c, error);
+  }
+});

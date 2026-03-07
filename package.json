@@ -1,0 +1,30 @@
+{
+  "name": "copilot-proxy-server",
+  "version": "1.0.0",
+  "description": "Standalone proxy server for GitHub Copilot LLM API with OpenAI, Anthropic, and Gemini compatible endpoints",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx --watch src/index.ts",
+    "build": "tsup",
+    "start": "node dist/index.js",
+    "auth": "tsx src/index.ts --auth",
+    "test:api": "node scripts/test-api.mjs"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.8",
+    "eventsource-parser": "^3.0.0",
+    "gpt-tokenizer": "^2.8.1",
+    "hono": "^4.7.4",
+    "sql.js": "^1.14.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.11",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
