@@ -13,6 +13,7 @@ export interface UsageRecord {
   total_tokens: number;
   stream: boolean;
   duration_ms: number;
+  ttfb_ms: number; // Time to first byte/token (0 for non-streaming)
 }
 
 let db: SqlJsDatabase | null = null;
@@ -60,13 +61,21 @@ export async function initDatabase(dataDir: string): Promise<void> {
       completion_tokens INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0,
       stream INTEGER NOT NULL DEFAULT 0,
-      duration_ms INTEGER NOT NULL DEFAULT 0
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      ttfb_ms INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_logs(timestamp);
     CREATE INDEX IF NOT EXISTS idx_usage_ip ON usage_logs(ip);
     CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model);
   `);
+
+  // Migration: add ttfb_ms column if missing
+  try {
+    db.run(`ALTER TABLE usage_logs ADD COLUMN ttfb_ms INTEGER NOT NULL DEFAULT 0`);
+  } catch {
+    // Column already exists — ignore
+  }
 
   saveDb();
 
@@ -85,8 +94,8 @@ export function logUsage(record: UsageRecord): void {
   setImmediate(() => {
     try {
       db!.run(
-        `INSERT INTO usage_logs (ip, model, endpoint, prompt_tokens, completion_tokens, total_tokens, stream, duration_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO usage_logs (ip, model, endpoint, prompt_tokens, completion_tokens, total_tokens, stream, duration_ms, ttfb_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           record.ip,
           record.model,
@@ -96,6 +105,7 @@ export function logUsage(record: UsageRecord): void {
           record.total_tokens,
           record.stream ? 1 : 0,
           record.duration_ms,
+          record.ttfb_ms,
         ]
       );
       scheduleSave();
@@ -151,21 +161,60 @@ export interface StatsOverview {
   total_completion_tokens: number;
   total_tokens: number;
   active_ips: number;
+  avg_ttfb_ms: number;
+  avg_duration_ms: number;
+  p50_ttfb_ms: number;
+  p95_ttfb_ms: number;
+  p50_duration_ms: number;
+  p95_duration_ms: number;
 }
 
 export function getStatsOverview(period: string): StatsOverview {
   const offset = periodToDatetime(period);
-  return queryOne<StatsOverview>(
+  const base = queryOne<{
+    total_requests: number;
+    total_prompt_tokens: number;
+    total_completion_tokens: number;
+    total_tokens: number;
+    active_ips: number;
+    avg_ttfb_ms: number;
+    avg_duration_ms: number;
+  }>(
     `SELECT
       COUNT(*) as total_requests,
       COALESCE(SUM(prompt_tokens), 0) as total_prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as total_completion_tokens,
       COALESCE(SUM(total_tokens), 0) as total_tokens,
-      COUNT(DISTINCT ip) as active_ips
+      COUNT(DISTINCT ip) as active_ips,
+      COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
+      COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
     WHERE timestamp >= datetime('now', ?)`,
     [offset]
   );
+
+  // Compute percentiles via sorted subqueries
+  const ttfbPercentiles = queryOne<{ p50: number; p95: number }>(
+    `SELECT
+      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE timestamp >= datetime('now', ?) AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE timestamp >= datetime('now', ?) AND ttfb_ms > 0)), 0) as p50,
+      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE timestamp >= datetime('now', ?) AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE timestamp >= datetime('now', ?) AND ttfb_ms > 0)), 0) as p95`,
+    [offset, offset, offset, offset]
+  );
+
+  const durationPercentiles = queryOne<{ p50: number; p95: number }>(
+    `SELECT
+      COALESCE((SELECT duration_ms FROM usage_logs WHERE timestamp >= datetime('now', ?) ORDER BY duration_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE timestamp >= datetime('now', ?))), 0) as p50,
+      COALESCE((SELECT duration_ms FROM usage_logs WHERE timestamp >= datetime('now', ?) ORDER BY duration_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE timestamp >= datetime('now', ?))), 0) as p95`,
+    [offset, offset, offset, offset]
+  );
+
+  return {
+    ...base,
+    p50_ttfb_ms: ttfbPercentiles.p50,
+    p95_ttfb_ms: ttfbPercentiles.p95,
+    p50_duration_ms: durationPercentiles.p50,
+    p95_duration_ms: durationPercentiles.p95,
+  };
 }
 
 export interface TimeSeriesPoint {
@@ -174,6 +223,8 @@ export interface TimeSeriesPoint {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  avg_ttfb_ms: number;
+  avg_duration_ms: number;
 }
 
 export function getTimeSeries(period: string): TimeSeriesPoint[] {
@@ -194,7 +245,9 @@ export function getTimeSeries(period: string): TimeSeriesPoint[] {
       COUNT(*) as requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-      COALESCE(SUM(total_tokens), 0) as total_tokens
+      COALESCE(SUM(total_tokens), 0) as total_tokens,
+      COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
+      COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
     WHERE timestamp >= datetime('now', ?)
     GROUP BY time_bucket
@@ -209,6 +262,8 @@ export interface TopEntry {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  avg_ttfb_ms: number;
+  avg_duration_ms: number;
 }
 
 export function getTopIps(period: string, limit = 20): TopEntry[] {
@@ -219,7 +274,9 @@ export function getTopIps(period: string, limit = 20): TopEntry[] {
       COUNT(*) as requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-      COALESCE(SUM(total_tokens), 0) as total_tokens
+      COALESCE(SUM(total_tokens), 0) as total_tokens,
+      COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
+      COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
     WHERE timestamp >= datetime('now', ?)
     GROUP BY ip
@@ -237,7 +294,9 @@ export function getTopModels(period: string, limit = 20): TopEntry[] {
       COUNT(*) as requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-      COALESCE(SUM(total_tokens), 0) as total_tokens
+      COALESCE(SUM(total_tokens), 0) as total_tokens,
+      COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
+      COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
     WHERE timestamp >= datetime('now', ?)
     GROUP BY model

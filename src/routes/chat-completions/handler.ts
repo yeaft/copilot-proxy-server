@@ -46,6 +46,7 @@ export async function handleChatCompletion(c: Context) {
       total_tokens: response.usage?.total_tokens ?? 0,
       stream: false,
       duration_ms: Date.now() - startTime,
+      ttfb_ms: Date.now() - startTime,
     });
     return c.json(response);
   }
@@ -53,7 +54,9 @@ export async function handleChatCompletion(c: Context) {
   logger.debug("Streaming response");
   return streamSSE(c, async (stream) => {
     let lastUsage: ChatCompletionChunk["usage"] | undefined;
+    let ttfb = 0;
     for await (const chunk of response) {
+      if (!ttfb) ttfb = Date.now() - startTime;
       await stream.writeSSE(chunk as SSEMessage);
       // Track usage from the last chunk that has it
       try {
@@ -70,6 +73,7 @@ export async function handleChatCompletion(c: Context) {
       total_tokens: lastUsage?.total_tokens ?? 0,
       stream: true,
       duration_ms: Date.now() - startTime,
+      ttfb_ms: ttfb,
     });
   });
 }

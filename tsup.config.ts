@@ -10,8 +10,7 @@ export default defineConfig({
   splitting: false,
   bundle: true,
   platform: "node",
-  noExternal: [/.*/],
-  external: ["better-sqlite3"],
+  noExternal: [/^(?!better-sqlite3|sql\.js).*/],
   banner: {
     js: `import { createRequire } from 'module'; const require = createRequire(import.meta.url);`,
   },
