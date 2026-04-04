@@ -6,6 +6,8 @@ import {
   getTimeSeries,
   getTopIps,
   getTopModels,
+  periodToTimeRange,
+  type TimeRange,
 } from "../../lib/db.js";
 import { getDashboardHtml } from "./page.js";
 
@@ -20,6 +22,23 @@ dashboardRoutes.use(
   basicAuth({ username: dashboardUser, password: dashboardPass })
 );
 
+/** Parse time range from query params. Supports both preset period and custom start/end. */
+function parseTimeRange(c: { req: { query: (k: string) => string | undefined } }): TimeRange {
+  const start = c.req.query("start");
+  const end = c.req.query("end");
+  const granularity = c.req.query("granularity");
+
+  if (start && end) {
+    return { start, end, granularity: granularity || undefined };
+  }
+
+  // Fallback to preset period
+  const period = c.req.query("period") || "24h";
+  const range = periodToTimeRange(period);
+  if (granularity) range.granularity = granularity;
+  return range;
+}
+
 // Dashboard page
 dashboardRoutes.get("/", (c) => {
   return c.html(getDashboardHtml());
@@ -27,24 +46,24 @@ dashboardRoutes.get("/", (c) => {
 
 // API: overview stats
 dashboardRoutes.get("/api/stats", (c) => {
-  const period = (c.req.query("period") as string) || "24h";
-  return c.json(getStatsOverview(period));
+  const range = parseTimeRange(c);
+  return c.json(getStatsOverview(range));
 });
 
 // API: time series data
 dashboardRoutes.get("/api/usage", (c) => {
-  const period = (c.req.query("period") as string) || "24h";
-  return c.json(getTimeSeries(period));
+  const range = parseTimeRange(c);
+  return c.json(getTimeSeries(range));
 });
 
 // API: top IPs by token usage
 dashboardRoutes.get("/api/top-ips", (c) => {
-  const period = (c.req.query("period") as string) || "24h";
-  return c.json(getTopIps(period));
+  const range = parseTimeRange(c);
+  return c.json(getTopIps(range));
 });
 
 // API: top models by token usage
 dashboardRoutes.get("/api/top-models", (c) => {
-  const period = (c.req.query("period") as string) || "24h";
-  return c.json(getTopModels(period));
+  const range = parseTimeRange(c);
+  return c.json(getTopModels(range));
 });

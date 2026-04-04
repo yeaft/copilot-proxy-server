@@ -120,8 +120,15 @@ export function getDb(): SqlJsDatabase {
   return db;
 }
 
-// Helper to compute the datetime cutoff string for a period
-function periodToDatetime(period: string): string {
+/** Query time range parameters */
+export interface TimeRange {
+  start: string; // ISO datetime e.g. '2026-04-01T00:00:00'
+  end: string;   // ISO datetime e.g. '2026-04-03T00:00:00'
+  granularity?: string; // '1m' | '5m' | '1h' | '1d' — auto-inferred if omitted
+}
+
+/** Convert a preset period string to a TimeRange (end = now) */
+export function periodToTimeRange(period: string): TimeRange {
   const hours: Record<string, number> = {
     "1h": 1,
     "6h": 6,
@@ -130,7 +137,44 @@ function periodToDatetime(period: string): string {
     "30d": 720,
   };
   const h = hours[period] ?? 24;
-  return `-${h} hours`;
+  const now = new Date();
+  const start = new Date(now.getTime() - h * 3600_000);
+  return {
+    start: start.toISOString().slice(0, 19),
+    end: now.toISOString().slice(0, 19),
+  };
+}
+
+/** Infer granularity from time range span */
+function inferGranularity(start: string, end: string): string {
+  const spanMs = new Date(end).getTime() - new Date(start).getTime();
+  const spanHours = spanMs / 3600_000;
+  if (spanHours <= 3) return "1m";
+  if (spanHours <= 24) return "5m";
+  if (spanHours <= 168) return "1h"; // 7 days
+  return "1d";
+}
+
+/** Get strftime format string from granularity */
+function granularityToStrftime(granularity: string): string {
+  switch (granularity) {
+    case "1m":
+      return "%Y-%m-%d %H:%M";
+    case "5m":
+      // SQLite doesn't have native 5-min bucketing, we'll handle in query
+      return "%Y-%m-%d %H:%M";
+    case "1h":
+      return "%Y-%m-%d %H:00";
+    case "1d":
+      return "%Y-%m-%d";
+    default:
+      return "%Y-%m-%d %H:00";
+  }
+}
+
+/** Resolve granularity (use provided or auto-infer) */
+function resolveGranularity(range: TimeRange): string {
+  return range.granularity || inferGranularity(range.start, range.end);
 }
 
 function queryAll<T>(sql: string, params: unknown[] = []): T[] {
@@ -169,8 +213,11 @@ export interface StatsOverview {
   p95_duration_ms: number;
 }
 
-export function getStatsOverview(period: string): StatsOverview {
-  const offset = periodToDatetime(period);
+export function getStatsOverview(range: TimeRange): StatsOverview {
+  const { start, end } = range;
+  const whereClause = `timestamp >= ? AND timestamp <= ?`;
+  const whereParams = [start, end];
+
   const base = queryOne<{
     total_requests: number;
     total_prompt_tokens: number;
@@ -189,23 +236,23 @@ export function getStatsOverview(period: string): StatsOverview {
       COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
-    WHERE timestamp >= datetime('now', ?)`,
-    [offset]
+    WHERE ${whereClause}`,
+    whereParams
   );
 
   // Compute percentiles via sorted subqueries
   const ttfbPercentiles = queryOne<{ p50: number; p95: number }>(
     `SELECT
-      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE timestamp >= datetime('now', ?) AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE timestamp >= datetime('now', ?) AND ttfb_ms > 0)), 0) as p50,
-      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE timestamp >= datetime('now', ?) AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE timestamp >= datetime('now', ?) AND ttfb_ms > 0)), 0) as p95`,
-    [offset, offset, offset, offset]
+      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE ${whereClause} AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause} AND ttfb_ms > 0)), 0) as p50,
+      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE ${whereClause} AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause} AND ttfb_ms > 0)), 0) as p95`,
+    [...whereParams, ...whereParams, ...whereParams, ...whereParams]
   );
 
   const durationPercentiles = queryOne<{ p50: number; p95: number }>(
     `SELECT
-      COALESCE((SELECT duration_ms FROM usage_logs WHERE timestamp >= datetime('now', ?) ORDER BY duration_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE timestamp >= datetime('now', ?))), 0) as p50,
-      COALESCE((SELECT duration_ms FROM usage_logs WHERE timestamp >= datetime('now', ?) ORDER BY duration_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE timestamp >= datetime('now', ?))), 0) as p95`,
-    [offset, offset, offset, offset]
+      COALESCE((SELECT duration_ms FROM usage_logs WHERE ${whereClause} ORDER BY duration_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause})), 0) as p50,
+      COALESCE((SELECT duration_ms FROM usage_logs WHERE ${whereClause} ORDER BY duration_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause})), 0) as p95`,
+    [...whereParams, ...whereParams, ...whereParams, ...whereParams]
   );
 
   return {
@@ -227,16 +274,28 @@ export interface TimeSeriesPoint {
   avg_duration_ms: number;
 }
 
-export function getTimeSeries(period: string): TimeSeriesPoint[] {
-  const offset = periodToDatetime(period);
+export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
+  const { start, end } = range;
+  const granularity = resolveGranularity(range);
+  const strftime = granularityToStrftime(granularity);
 
-  let strftime: string;
-  if (period === "1h" || period === "6h") {
-    strftime = "%Y-%m-%d %H:%M";
-  } else if (period === "24h") {
-    strftime = "%Y-%m-%d %H:00";
-  } else {
-    strftime = "%Y-%m-%d";
+  if (granularity === "5m") {
+    // 5-minute bucketing: truncate minutes to nearest 5
+    return queryAll<TimeSeriesPoint>(
+      `SELECT
+        strftime('%Y-%m-%d %H:', timestamp) || printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / 5) * 5) as time_bucket,
+        COUNT(*) as requests,
+        COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+        COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+        COALESCE(SUM(total_tokens), 0) as total_tokens,
+        COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
+        COALESCE(AVG(duration_ms), 0) as avg_duration_ms
+      FROM usage_logs
+      WHERE timestamp >= ? AND timestamp <= ?
+      GROUP BY time_bucket
+      ORDER BY time_bucket`,
+      [start, end]
+    );
   }
 
   return queryAll<TimeSeriesPoint>(
@@ -249,10 +308,10 @@ export function getTimeSeries(period: string): TimeSeriesPoint[] {
       COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
-    WHERE timestamp >= datetime('now', ?)
+    WHERE timestamp >= ? AND timestamp <= ?
     GROUP BY time_bucket
     ORDER BY time_bucket`,
-    [offset]
+    [start, end]
   );
 }
 
@@ -266,8 +325,8 @@ export interface TopEntry {
   avg_duration_ms: number;
 }
 
-export function getTopIps(period: string, limit = 20): TopEntry[] {
-  const offset = periodToDatetime(period);
+export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
+  const { start, end } = range;
   return queryAll<TopEntry>(
     `SELECT
       ip as name,
@@ -278,16 +337,16 @@ export function getTopIps(period: string, limit = 20): TopEntry[] {
       COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
-    WHERE timestamp >= datetime('now', ?)
+    WHERE timestamp >= ? AND timestamp <= ?
     GROUP BY ip
     ORDER BY total_tokens DESC
     LIMIT ?`,
-    [offset, limit]
+    [start, end, limit]
   );
 }
 
-export function getTopModels(period: string, limit = 20): TopEntry[] {
-  const offset = periodToDatetime(period);
+export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
+  const { start, end } = range;
   return queryAll<TopEntry>(
     `SELECT
       model as name,
@@ -298,10 +357,10 @@ export function getTopModels(period: string, limit = 20): TopEntry[] {
       COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
-    WHERE timestamp >= datetime('now', ?)
+    WHERE timestamp >= ? AND timestamp <= ?
     GROUP BY model
     ORDER BY total_tokens DESC
     LIMIT ?`,
-    [offset, limit]
+    [start, end, limit]
   );
 }
