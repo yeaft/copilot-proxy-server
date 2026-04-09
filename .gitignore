@@ -27,6 +27,9 @@ Desktop.ini
 # Claude Code temp files
 tmpclaude-*
 
+# Benchmark results
+bench-results*.json
+
 # Logs
 *.log
 npm-debug.log*
