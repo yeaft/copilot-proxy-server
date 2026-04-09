@@ -342,9 +342,9 @@ async function main() {
 
   // 按版本号降序排列，优先测试最新的模型
   // 优先级列表：匹配到的排在最前面
-  const openaiPriority = ["gpt-5.2", "gpt-5.1", "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "o4", "o3", "o1"];
-  const anthropicPriority = ["claude-opus-4.6", "claude-sonnet-4.5", "claude-sonnet-4", "claude-opus-4.5", "claude-haiku-4.5"];
-  const geminiPriority = ["gemini-3-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"];
+  const openaiPriority = ["gpt-5.4", "gpt-5.2", "gpt-5.1", "gpt-5.4-mini", "gpt-5-mini", "gpt-4.1", "gpt-4o", "o4", "o3", "o1"];
+  const anthropicPriority = ["claude-opus-4.6", "claude-sonnet-4.6", "claude-sonnet-4.5", "claude-opus-4.5", "claude-haiku-4.5", "claude-sonnet-4"];
+  const geminiPriority = ["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"];
 
   const prioritySort = (priorities) => (a, b) => {
     const idxOf = (s) => {

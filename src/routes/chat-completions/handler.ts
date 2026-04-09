@@ -21,8 +21,8 @@ export async function handleChatCompletion(c: Context) {
   const payload = await c.req.json<ChatCompletionsPayload>();
   logger.debug("OpenAI request payload:", JSON.stringify(payload).slice(-400));
 
-  // Set max_tokens from model capabilities if not provided
-  if (payload.max_tokens == null) {
+  // Set max_tokens from model capabilities if neither max_tokens nor max_completion_tokens is provided
+  if (payload.max_tokens == null && payload.max_completion_tokens == null) {
     const selectedModel = state.models?.data.find(
       (model) => model.id === payload.model
     );
