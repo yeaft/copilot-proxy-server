@@ -292,8 +292,10 @@ function needsMaxCompletionTokens(model) {
 async function measureStream(baseUrl, apiKey, model, messages, maxTokens) {
   const start = performance.now();
 
+  // gpt-5.4 等模型不接受 max_tokens，而旧版代理会自动注入 max_tokens，
+  // 所以对这类模型干脆不发任何 token 限制参数，避免代理注入 max_tokens 导致上游报错
   const tokenParam = needsMaxCompletionTokens(model)
-    ? { max_completion_tokens: maxTokens }
+    ? {}
     : { max_tokens: maxTokens };
 
   const res = await fetch(`${baseUrl}/v1/chat/completions`, {
