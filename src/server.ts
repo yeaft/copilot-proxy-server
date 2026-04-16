@@ -11,6 +11,7 @@ import { completionRoutes } from "./routes/chat-completions/route.js";
 import { messageRoutes } from "./routes/messages/route.js";
 import { geminiRoutes } from "./routes/gemini/route.js";
 import { dashboardRoutes } from "./routes/dashboard/route.js";
+import { responsesRoutes } from "./routes/responses/route.js";
 
 export const app = new Hono();
 
@@ -110,6 +111,10 @@ app.get("/models", async (c) => {
 // OpenAI-compatible endpoints
 app.route("/v1/chat/completions", completionRoutes);
 app.route("/chat/completions", completionRoutes);
+
+// OpenAI Responses API (for codex models)
+app.route("/v1/responses", responsesRoutes);
+app.route("/responses", responsesRoutes);
 
 // Anthropic-compatible endpoints
 app.route("/v1/messages", messageRoutes);
