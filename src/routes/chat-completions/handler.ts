@@ -7,12 +7,20 @@ import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
 import { logUsage } from "../../lib/db.js";
 import { getClientIp } from "../../lib/ip.js";
-import { createChatCompletions } from "../../services/copilot-completions.js";
+import {
+  createChatCompletions,
+  isResponsesOnlyModel,
+  createResponses,
+  chatToResponsesPayload,
+  responsesToChatResponse,
+  responsesStreamToChatStream,
+} from "../../services/copilot-completions.js";
 import type {
   ChatCompletionsPayload,
   ChatCompletionResponse,
   ChatCompletionChunk,
 } from "../../types/openai.js";
+import type { ResponsesResult } from "../../types/responses.js";
 
 export async function handleChatCompletion(c: Context) {
   await checkRateLimit(state);
@@ -20,6 +28,11 @@ export async function handleChatCompletion(c: Context) {
 
   const payload = await c.req.json<ChatCompletionsPayload>();
   logger.debug("OpenAI request payload:", JSON.stringify(payload).slice(-400));
+
+  // Codex models only support /responses endpoint — transparently convert
+  if (isResponsesOnlyModel(payload.model)) {
+    return handleCodexViaChatCompletions(c, payload, startTime);
+  }
 
   // Set max_tokens from model capabilities if neither max_tokens nor max_completion_tokens is provided
   if (payload.max_tokens == null && payload.max_completion_tokens == null) {
@@ -78,8 +91,78 @@ export async function handleChatCompletion(c: Context) {
   });
 }
 
+/**
+ * Handle codex models via the chat completions endpoint by converting
+ * to/from the Responses API format transparently.
+ */
+async function handleCodexViaChatCompletions(
+  c: Context,
+  payload: ChatCompletionsPayload,
+  startTime: number
+) {
+  logger.debug(`Codex model ${payload.model}: converting chat/completions → /responses`);
+
+  const responsesPayload = chatToResponsesPayload(payload);
+  const clientHeaders = extractClientHeaders(c);
+  const response = await createResponses(responsesPayload, clientHeaders);
+  const ip = getClientIp(c);
+
+  // Non-streaming
+  if (isResponsesResult(response)) {
+    const chatResponse = responsesToChatResponse(response, payload.model);
+    logUsage({
+      ip,
+      model: payload.model,
+      endpoint: "openai",
+      prompt_tokens: response.usage?.input_tokens ?? 0,
+      completion_tokens: response.usage?.output_tokens ?? 0,
+      total_tokens: response.usage?.total_tokens ?? 0,
+      stream: false,
+      duration_ms: Date.now() - startTime,
+      ttfb_ms: Date.now() - startTime,
+    });
+    return c.json(chatResponse);
+  }
+
+  // Streaming: convert responses stream → chat completions chunks
+  const chatStream = responsesStreamToChatStream(response, payload.model);
+
+  return streamSSE(c, async (stream) => {
+    let lastUsage: ChatCompletionChunk["usage"] | undefined;
+    let ttfb = 0;
+
+    for await (const chunk of chatStream) {
+      if (!ttfb) ttfb = Date.now() - startTime;
+      await stream.writeSSE({ data: chunk.data });
+
+      try {
+        const parsed = JSON.parse(chunk.data) as ChatCompletionChunk;
+        if (parsed.usage) lastUsage = parsed.usage;
+      } catch { /* ignore */ }
+    }
+
+    logUsage({
+      ip,
+      model: payload.model,
+      endpoint: "openai",
+      prompt_tokens: lastUsage?.prompt_tokens ?? 0,
+      completion_tokens: lastUsage?.completion_tokens ?? 0,
+      total_tokens: lastUsage?.total_tokens ?? 0,
+      stream: true,
+      duration_ms: Date.now() - startTime,
+      ttfb_ms: ttfb,
+    });
+  });
+}
+
 function isNonStreaming(
   response: ChatCompletionResponse | AsyncIterable<{ data: string }>
 ): response is ChatCompletionResponse {
   return Object.hasOwn(response as object, "choices");
+}
+
+function isResponsesResult(
+  response: ResponsesResult | AsyncIterable<{ event: string; data: string }>
+): response is ResponsesResult {
+  return Object.hasOwn(response as object, "output");
 }
