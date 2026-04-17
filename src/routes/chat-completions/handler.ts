@@ -9,7 +9,7 @@ import { logUsage } from "../../lib/db.js";
 import { getClientIp } from "../../lib/ip.js";
 import {
   createChatCompletions,
-  isResponsesOnlyModel,
+  shouldUseResponsesApi,
   createResponses,
   chatToResponsesPayload,
   responsesToChatResponse,
@@ -29,9 +29,10 @@ export async function handleChatCompletion(c: Context) {
   const payload = await c.req.json<ChatCompletionsPayload>();
   logger.debug("OpenAI request payload:", JSON.stringify(payload).slice(-400));
 
-  // Codex models only support /responses endpoint — transparently convert
-  if (isResponsesOnlyModel(payload.model)) {
-    return handleCodexViaChatCompletions(c, payload, startTime);
+  // Models that support /responses — route through it for better capabilities
+  // (reasoning tokens, etc.). Codex models require it; gpt-5.x also prefers it.
+  if (shouldUseResponsesApi(payload.model)) {
+    return handleViaResponsesApi(c, payload, startTime);
   }
 
   // Set max_tokens from model capabilities if neither max_tokens nor max_completion_tokens is provided
@@ -92,15 +93,15 @@ export async function handleChatCompletion(c: Context) {
 }
 
 /**
- * Handle codex models via the chat completions endpoint by converting
- * to/from the Responses API format transparently.
+ * Handle models that support /responses by converting chat/completions
+ * requests to/from the Responses API format transparently.
  */
-async function handleCodexViaChatCompletions(
+async function handleViaResponsesApi(
   c: Context,
   payload: ChatCompletionsPayload,
   startTime: number
 ) {
-  logger.debug(`Codex model ${payload.model}: converting chat/completions → /responses`);
+  logger.debug(`Model ${payload.model}: routing chat/completions → /responses`);
 
   const responsesPayload = chatToResponsesPayload(payload);
   const clientHeaders = extractClientHeaders(c);

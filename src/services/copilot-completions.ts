@@ -131,8 +131,24 @@ export function isNonStreamingResponse(
 // Codex / Responses API support
 // ---------------------------------------------------------------------------
 
-/** Models that only support the /responses endpoint (not /chat/completions) */
-export function isResponsesOnlyModel(model: string): boolean {
+/**
+ * Determine whether a model should route through the /responses endpoint.
+ * Prefers /responses whenever the upstream model advertises support for it
+ * (even when /chat/completions is also available).
+ * Falls back to a name-based heuristic (codex models) when model metadata
+ * isn't cached yet.
+ */
+export function shouldUseResponsesApi(model: string): boolean {
+  const m = state.models?.data.find((x) => x.id === model);
+  if (m?.supported_endpoints && m.supported_endpoints.length > 0) {
+    return m.supported_endpoints.includes("/responses");
+  }
+  // Fallback heuristic when model metadata is unavailable
+  return model.includes("-codex");
+}
+
+/** Models that outright reject temperature/top_p (codex family). */
+function isCodexModel(model: string): boolean {
   return model.includes("-codex");
 }
 
@@ -246,7 +262,7 @@ export function chatToResponsesPayload(
   }
 
   // Pass through common parameters — but skip for codex models which reject them
-  const isCodex = isResponsesOnlyModel(payload.model);
+  const isCodex = isCodexModel(payload.model);
   if (!isCodex) {
     if (payload.temperature != null) responsesPayload.temperature = payload.temperature;
     if (payload.top_p != null) responsesPayload.top_p = payload.top_p;
