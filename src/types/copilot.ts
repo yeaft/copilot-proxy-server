@@ -18,6 +18,7 @@ export interface Model {
     state: string;
     terms: string;
   };
+  supported_endpoints?: Array<string>;
 }
 
 interface ModelCapabilities {
