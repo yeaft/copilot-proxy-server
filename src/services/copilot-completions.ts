@@ -245,9 +245,12 @@ export function chatToResponsesPayload(
     responsesPayload.max_output_tokens = maxTokens;
   }
 
-  // Pass through common parameters
-  if (payload.temperature != null) responsesPayload.temperature = payload.temperature;
-  if (payload.top_p != null) responsesPayload.top_p = payload.top_p;
+  // Pass through common parameters — but skip for codex models which reject them
+  const isCodex = isResponsesOnlyModel(payload.model);
+  if (!isCodex) {
+    if (payload.temperature != null) responsesPayload.temperature = payload.temperature;
+    if (payload.top_p != null) responsesPayload.top_p = payload.top_p;
+  }
 
   // Convert tools
   if (payload.tools?.length) {
