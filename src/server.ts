@@ -12,6 +12,7 @@ import { messageRoutes } from "./routes/messages/route.js";
 import { geminiRoutes } from "./routes/gemini/route.js";
 import { dashboardRoutes } from "./routes/dashboard/route.js";
 import { responsesRoutes } from "./routes/responses/route.js";
+import { playgroundRoutes } from "./routes/playground/route.js";
 
 export const app = new Hono();
 
@@ -28,6 +29,12 @@ app.use("*", async (c, next) => {
 
   // Skip API key auth for dashboard (has its own Basic Auth)
   if (c.req.path.startsWith("/dashboard")) {
+    return next();
+  }
+
+  // Skip auth for playground HTML page only (not its API subpaths).
+  // The page prompts the user for an API key and then calls authenticated endpoints.
+  if (c.req.path === "/playground" || c.req.path === "/playground/") {
     return next();
   }
 
@@ -124,3 +131,6 @@ app.route("/", geminiRoutes);
 
 // Dashboard (protected by Basic Auth)
 app.route("/dashboard", dashboardRoutes);
+
+// Playground (public HTML, API subpaths require API key)
+app.route("/playground", playgroundRoutes);
