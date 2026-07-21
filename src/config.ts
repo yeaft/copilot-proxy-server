@@ -6,6 +6,7 @@ export interface Config {
   port: number;
   githubToken?: string;
   apiKey?: string;
+  deepseekApiKey?: string;
   accountType: string;
   verbose: boolean;
   rateLimitSeconds?: number;
@@ -35,6 +36,7 @@ export function loadConfig(): Config {
     port: parseInt(process.env.PORT || "6628", 10),
     githubToken: process.env.GITHUB_TOKEN,
     apiKey: process.env.API_KEY,
+    deepseekApiKey: process.env.DEEPSEEK_API_KEY,
     accountType: process.env.ACCOUNT_TYPE || "individual",
     verbose: process.env.VERBOSE === "true",
     rateLimitSeconds: rateLimit,

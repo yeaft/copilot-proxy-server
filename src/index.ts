@@ -6,6 +6,7 @@ import { initDatabase } from "./lib/db.js";
 import { state } from "./lib/state.js";
 import { setupGitHubToken } from "./auth/github-token.js";
 import { setupCopilotToken } from "./auth/copilot-token.js";
+import { setupDeepseekToken } from "./auth/deepseek-token.js";
 import { cacheModels } from "./services/copilot-models.js";
 import { app } from "./server.js";
 
@@ -53,6 +54,12 @@ async function main() {
 
   // Exchange for Copilot token
   await setupCopilotToken();
+
+  // Setup DeepSeek API key (independent of Copilot, no device flow needed)
+  await setupDeepseekToken({
+    dataDir: config.dataDir,
+    providedToken: config.deepseekApiKey,
+  });
 
   // Cache available models
   await cacheModels();

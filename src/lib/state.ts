@@ -4,6 +4,7 @@ export interface State {
   githubToken?: string;
   copilotToken?: string;
   apiKey?: string;
+  deepseekApiKey?: string;
   accountType: string;
   models?: ModelsResponse;
   vsCodeVersion: string;
