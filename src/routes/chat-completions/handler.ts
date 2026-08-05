@@ -21,6 +21,10 @@ import type {
   ChatCompletionChunk,
 } from "../../types/openai.js";
 import type { ResponsesResult } from "../../types/responses.js";
+import {
+  createDeepseekCompletion,
+  isDeepseekModel,
+} from "../../services/deepseek-completions.js";
 
 export async function handleChatCompletion(c: Context) {
   await checkRateLimit(state);
@@ -28,6 +32,10 @@ export async function handleChatCompletion(c: Context) {
 
   const payload = await c.req.json<ChatCompletionsPayload>();
   logger.debug("OpenAI request payload:", JSON.stringify(payload).slice(-400));
+
+  if (isDeepseekModel(payload.model)) {
+    return handleDeepseekChatCompletion(c, payload, startTime);
+  }
 
   // Models that support /responses — route through it for better capabilities
   // (reasoning tokens, etc.). Codex models require it; gpt-5.x also prefers it.
@@ -154,6 +162,31 @@ async function handleViaResponsesApi(
       ttfb_ms: ttfb,
     });
   });
+}
+
+async function handleDeepseekChatCompletion(
+  c: Context,
+  payload: ChatCompletionsPayload,
+  startTime: number
+) {
+  const response = await createDeepseekCompletion(
+    "/v1/chat/completions",
+    payload as unknown as Record<string, unknown>
+  );
+
+  logUsage({
+    ip: getClientIp(c),
+    model: payload.model,
+    endpoint: "deepseek-chat-completions",
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    stream: Boolean(payload.stream),
+    duration_ms: Date.now() - startTime,
+    ttfb_ms: Date.now() - startTime,
+  });
+
+  return response;
 }
 
 function isNonStreaming(

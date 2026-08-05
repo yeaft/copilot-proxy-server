@@ -9,6 +9,10 @@ import { logUsage } from "../../lib/db.js";
 import { getClientIp } from "../../lib/ip.js";
 import { createResponses } from "../../services/copilot-completions.js";
 import type { ResponsesPayload, ResponsesResult } from "../../types/responses.js";
+import {
+  createDeepseekCompletion,
+  isDeepseekModel,
+} from "../../services/deepseek-completions.js";
 
 export async function handleResponses(c: Context) {
   await checkRateLimit(state);
@@ -16,6 +20,27 @@ export async function handleResponses(c: Context) {
 
   const payload = await c.req.json<ResponsesPayload>();
   logger.debug("Responses API request:", JSON.stringify(payload).slice(-400));
+
+  if (isDeepseekModel(payload.model)) {
+    const response = await createDeepseekCompletion(
+      "/v1/responses",
+      payload as unknown as Record<string, unknown>
+    );
+
+    logUsage({
+      ip: getClientIp(c),
+      model: payload.model,
+      endpoint: "deepseek-responses",
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+      stream: Boolean(payload.stream),
+      duration_ms: Date.now() - startTime,
+      ttfb_ms: Date.now() - startTime,
+    });
+
+    return response;
+  }
 
   const clientHeaders = extractClientHeaders(c);
   const response = await createResponses(payload, clientHeaders);
