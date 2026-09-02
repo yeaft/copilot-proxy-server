@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { logger } from "./logger.js";
+import { calculateUsageCost } from "./pricing.js";
 
 export interface UsageRecord {
   ip: string;
@@ -11,6 +12,7 @@ export interface UsageRecord {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  cached_prompt_tokens?: number;
   stream: boolean;
   duration_ms: number;
   ttfb_ms: number; // Time to first byte/token (0 for non-streaming)
@@ -60,6 +62,7 @@ export async function initDatabase(dataDir: string): Promise<void> {
       prompt_tokens INTEGER NOT NULL DEFAULT 0,
       completion_tokens INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0,
+      cached_prompt_tokens INTEGER NOT NULL DEFAULT 0,
       stream INTEGER NOT NULL DEFAULT 0,
       duration_ms INTEGER NOT NULL DEFAULT 0,
       ttfb_ms INTEGER NOT NULL DEFAULT 0
@@ -70,11 +73,16 @@ export async function initDatabase(dataDir: string): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model);
   `);
 
-  // Migration: add ttfb_ms column if missing
-  try {
-    db.run(`ALTER TABLE usage_logs ADD COLUMN ttfb_ms INTEGER NOT NULL DEFAULT 0`);
-  } catch {
-    // Column already exists — ignore
+  // Additive migrations keep existing usage databases compatible.
+  for (const column of [
+    "ttfb_ms INTEGER NOT NULL DEFAULT 0",
+    "cached_prompt_tokens INTEGER NOT NULL DEFAULT 0",
+  ]) {
+    try {
+      db.run(`ALTER TABLE usage_logs ADD COLUMN ${column}`);
+    } catch {
+      // Column already exists.
+    }
   }
 
   saveDb();
@@ -94,8 +102,10 @@ export function logUsage(record: UsageRecord): void {
   setImmediate(() => {
     try {
       db!.run(
-        `INSERT INTO usage_logs (ip, model, endpoint, prompt_tokens, completion_tokens, total_tokens, stream, duration_ms, ttfb_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO usage_logs (
+          ip, model, endpoint, prompt_tokens, completion_tokens, total_tokens,
+          cached_prompt_tokens, stream, duration_ms, ttfb_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           record.ip,
           record.model,
@@ -103,6 +113,7 @@ export function logUsage(record: UsageRecord): void {
           record.prompt_tokens,
           record.completion_tokens,
           record.total_tokens,
+          record.cached_prompt_tokens ?? 0,
           record.stream ? 1 : 0,
           record.duration_ms,
           record.ttfb_ms,
@@ -203,7 +214,11 @@ export interface StatsOverview {
   total_requests: number;
   total_prompt_tokens: number;
   total_completion_tokens: number;
+  total_cached_prompt_tokens: number;
   total_tokens: number;
+  total_credits: number;
+  total_cost_usd: number;
+  unpriced_tokens: number;
   active_ips: number;
   avg_ttfb_ms: number;
   avg_duration_ms: number;
@@ -222,6 +237,7 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
     total_requests: number;
     total_prompt_tokens: number;
     total_completion_tokens: number;
+    total_cached_prompt_tokens: number;
     total_tokens: number;
     active_ips: number;
     avg_ttfb_ms: number;
@@ -231,6 +247,7 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
       COUNT(*) as total_requests,
       COALESCE(SUM(prompt_tokens), 0) as total_prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as total_completion_tokens,
+      COALESCE(SUM(cached_prompt_tokens), 0) as total_cached_prompt_tokens,
       COALESCE(SUM(total_tokens), 0) as total_tokens,
       COUNT(DISTINCT ip) as active_ips,
       COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
@@ -255,8 +272,34 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
     [...whereParams, ...whereParams, ...whereParams, ...whereParams]
   );
 
+  const modelUsage = queryAll<{
+    model: string;
+    prompt_tokens: number;
+    completion_tokens: number;
+    cached_prompt_tokens: number;
+    total_tokens: number;
+  }>(
+    `SELECT model,
+      COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+      COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+      COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
+      COALESCE(SUM(total_tokens), 0) as total_tokens
+    FROM usage_logs WHERE ${whereClause} GROUP BY model`,
+    whereParams
+  );
+  let totalCredits = 0;
+  let unpricedTokens = 0;
+  for (const usage of modelUsage) {
+    const cost = calculateUsageCost(usage.model, usage);
+    if (cost.priced) totalCredits += cost.credits;
+    else unpricedTokens += usage.total_tokens;
+  }
+
   return {
     ...base,
+    total_credits: totalCredits,
+    total_cost_usd: totalCredits * 0.01,
+    unpriced_tokens: unpricedTokens,
     p50_ttfb_ms: ttfbPercentiles.p50,
     p95_ttfb_ms: ttfbPercentiles.p95,
     p50_duration_ms: durationPercentiles.p50,
@@ -269,6 +312,7 @@ export interface TimeSeriesPoint {
   requests: number;
   prompt_tokens: number;
   completion_tokens: number;
+  cached_prompt_tokens: number;
   total_tokens: number;
   avg_ttfb_ms: number;
   avg_duration_ms: number;
@@ -287,6 +331,7 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
         COUNT(*) as requests,
         COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
         COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+        COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
         COALESCE(SUM(total_tokens), 0) as total_tokens,
         COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
         COALESCE(AVG(duration_ms), 0) as avg_duration_ms
@@ -304,6 +349,7 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
       COUNT(*) as requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+      COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
       COALESCE(SUM(total_tokens), 0) as total_tokens,
       COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
@@ -320,7 +366,10 @@ export interface TopEntry {
   requests: number;
   prompt_tokens: number;
   completion_tokens: number;
+  cached_prompt_tokens: number;
   total_tokens: number;
+  credits?: number | null;
+  cost_usd?: number | null;
   avg_ttfb_ms: number;
   avg_duration_ms: number;
 }
@@ -333,6 +382,7 @@ export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
       COUNT(*) as requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+      COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
       COALESCE(SUM(total_tokens), 0) as total_tokens,
       COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
@@ -347,12 +397,13 @@ export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
 
 export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
   const { start, end } = range;
-  return queryAll<TopEntry>(
+  const rows = queryAll<TopEntry>(
     `SELECT
       model as name,
       COUNT(*) as requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+      COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
       COALESCE(SUM(total_tokens), 0) as total_tokens,
       COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
@@ -363,4 +414,12 @@ export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
     LIMIT ?`,
     [start, end, limit]
   );
+  return rows.map((row) => {
+    const cost = calculateUsageCost(row.name, row);
+    return {
+      ...row,
+      credits: cost.priced ? cost.credits : null,
+      cost_usd: cost.priced ? cost.usd : null,
+    };
+  });
 }

@@ -56,6 +56,7 @@ export async function handleResponses(c: Context) {
       prompt_tokens: response.usage?.input_tokens ?? 0,
       completion_tokens: response.usage?.output_tokens ?? 0,
       total_tokens: response.usage?.total_tokens ?? 0,
+      cached_prompt_tokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
       stream: false,
       duration_ms: Date.now() - startTime,
       ttfb_ms: Date.now() - startTime,
@@ -66,7 +67,7 @@ export async function handleResponses(c: Context) {
   // Streaming: forward SSE events directly
   logger.debug("Streaming responses result");
   return streamSSE(c, async (stream) => {
-    let lastUsage: { input_tokens: number; output_tokens: number; total_tokens: number } | undefined;
+    let lastUsage: ResponsesResult["usage"] | undefined;
     let ttfb = 0;
 
     for await (const sse of response) {
@@ -93,6 +94,7 @@ export async function handleResponses(c: Context) {
       prompt_tokens: lastUsage?.input_tokens ?? 0,
       completion_tokens: lastUsage?.output_tokens ?? 0,
       total_tokens: lastUsage?.total_tokens ?? 0,
+      cached_prompt_tokens: lastUsage?.input_tokens_details?.cached_tokens ?? 0,
       stream: true,
       duration_ms: Date.now() - startTime,
       ttfb_ms: ttfb,

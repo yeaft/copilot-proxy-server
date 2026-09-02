@@ -28,6 +28,7 @@ export function getDashboardHtml(): string {
       border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s;
     }
     .custom-range .apply-btn:hover { background: #2563eb; }
+    .range-error { color: #f87171; font-size: 12px; min-height: 16px; }
     .granularity-label { font-size: 12px; color: #64748b; padding: 4px 10px; background: #334155; border-radius: 4px; }
     .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
@@ -72,6 +73,7 @@ export function getDashboardHtml(): string {
         <input type="datetime-local" id="range-end" step="60">
         <button class="apply-btn" id="apply-range">Apply</button>
       </div>
+      <span class="range-error" id="range-error" role="alert"></span>
       <span class="granularity-label" id="granularity-label"></span>
     </div>
   </div>
@@ -80,7 +82,11 @@ export function getDashboardHtml(): string {
     <!-- Stats cards -->
     <div class="cards">
       <div class="card"><div class="card-label">Total Requests</div><div class="card-value" id="stat-requests">-</div></div>
+      <div class="card"><div class="card-label">Uncached Input</div><div class="card-value" id="stat-input-tokens">-</div></div>
+      <div class="card"><div class="card-label">Cache Read</div><div class="card-value" id="stat-cached-tokens">-</div></div>
+      <div class="card"><div class="card-label">Output Tokens</div><div class="card-value" id="stat-output-tokens">-</div></div>
       <div class="card"><div class="card-label">Total Tokens</div><div class="card-value" id="stat-tokens">-</div></div>
+      <div class="card"><div class="card-label">Estimated Cost</div><div class="card-value" id="stat-cost">-</div><div class="card-sub" id="stat-credits"></div></div>
       <div class="card"><div class="card-label">Active IPs</div><div class="card-value" id="stat-ips">-</div></div>
       <div class="card">
         <div class="card-label">Avg TTFB</div>
@@ -130,7 +136,7 @@ export function getDashboardHtml(): string {
       <div class="table-box">
         <h3>Top Models</h3>
         <table>
-          <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num">Avg TTFB</th><th class="num">Avg Duration</th></tr></thead>
+          <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Cache Read</th><th class="num">Output</th><th class="num">Credits</th><th class="num">Cost</th></tr></thead>
           <tbody id="table-models"></tbody>
         </table>
       </div>
@@ -174,7 +180,16 @@ export function getDashboardHtml(): string {
     const h = periodHours[period] || 24;
     const now = new Date();
     const start = new Date(now.getTime() - h * 3600000);
-    return { start: toLocal(start), end: toLocal(now) };
+    return { start: toUtc(start), end: toUtc(now) };
+  }
+
+  function toUtc(d) {
+    return d.toISOString().slice(0, 19);
+  }
+
+  function syncRangeInputs(start, end) {
+    document.getElementById('range-start').value = toLocal(new Date(start + 'Z')).slice(0, 16);
+    document.getElementById('range-end').value = toLocal(new Date(end + 'Z')).slice(0, 16);
   }
 
   function toLocal(d) {
@@ -197,13 +212,8 @@ export function getDashboardHtml(): string {
 
   // ── Build query string ──────────────────────────────────────
   function buildQuery() {
-    let start, end;
-    if (currentMode === 'preset') {
-      const r = periodToRange(currentPeriod);
-      start = r.start; end = r.end;
-    } else {
-      start = currentStart; end = currentEnd;
-    }
+    let start = currentStart;
+    let end = currentEnd;
     if (!start || !end) {
       const r = periodToRange('24h');
       start = r.start; end = r.end;
@@ -224,7 +234,12 @@ export function getDashboardHtml(): string {
   async function loadStats() {
     const s = await fetchJSON('/dashboard/api/stats?' + buildQuery());
     document.getElementById('stat-requests').textContent = fmt(s.total_requests);
+    document.getElementById('stat-input-tokens').textContent = fmt(Math.max(0, s.total_prompt_tokens - s.total_cached_prompt_tokens));
+    document.getElementById('stat-cached-tokens').textContent = fmt(s.total_cached_prompt_tokens);
+    document.getElementById('stat-output-tokens').textContent = fmt(s.total_completion_tokens);
     document.getElementById('stat-tokens').textContent = fmt(s.total_tokens);
+    document.getElementById('stat-cost').textContent = '$' + Number(s.total_cost_usd).toFixed(4);
+    document.getElementById('stat-credits').textContent = Number(s.total_credits).toFixed(2) + ' credits' + (s.unpriced_tokens ? ' · ' + fmt(s.unpriced_tokens) + ' unpriced tokens' : '');
     document.getElementById('stat-ips').textContent = s.active_ips;
     document.getElementById('stat-ttfb').textContent = fmtMs(s.avg_ttfb_ms);
     document.getElementById('stat-ttfb-pct').textContent = 'P50: ' + fmtMs(s.p50_ttfb_ms) + '  P95: ' + fmtMs(s.p95_ttfb_ms);
@@ -268,14 +283,15 @@ export function getDashboardHtml(): string {
     if (!timelineChart) timelineChart = echarts.init(document.getElementById('chart-timeline'));
     timelineChart.setOption({
       tooltip: { trigger: 'axis' },
-      legend: { data: ['Prompt', 'Completion'], textStyle: { color: '#94a3b8' }, top: 0 },
+      legend: { data: ['Uncached Input', 'Cache Read', 'Output'], textStyle: { color: '#94a3b8' }, top: 0 },
       grid: { left: 60, right: 20, top: 40, bottom: 54 },
       xAxis: { type: 'category', data: data.map(d => d.time_bucket), axisLabel: { color: '#64748b', fontSize: 11 }, axisLine: { lineStyle: { color: '#334155' } } },
       yAxis: { type: 'value', axisLabel: { color: '#64748b', formatter: function(v) { return v >= 1000 ? (v/1000).toFixed(0) + 'K' : v; } }, splitLine: { lineStyle: { color: '#1e293b' } } },
       dataZoom: makeDataZoom(),
       series: [
-        { name: 'Prompt', type: 'line', data: data.map(d => d.prompt_tokens), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#3b82f6' }, areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(59,130,246,0.3)' }, { offset: 1, color: 'rgba(59,130,246,0.02)' }] } } },
-        { name: 'Completion', type: 'line', data: data.map(d => d.completion_tokens), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#10b981' }, areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(16,185,129,0.3)' }, { offset: 1, color: 'rgba(16,185,129,0.02)' }] } } }
+        { name: 'Uncached Input', type: 'line', data: data.map(d => Math.max(0, d.prompt_tokens - d.cached_prompt_tokens)), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#3b82f6' } },
+        { name: 'Cache Read', type: 'line', data: data.map(d => d.cached_prompt_tokens), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#f59e0b' } },
+        { name: 'Output', type: 'line', data: data.map(d => d.completion_tokens), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#10b981' } }
       ]
     }, true);
 
@@ -314,12 +330,18 @@ export function getDashboardHtml(): string {
     const data = await fetchJSON('/dashboard/api/top-models?' + buildQuery());
     const tbody = document.getElementById('table-models');
     tbody.innerHTML = data.map(d =>
-      '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(d.total_tokens) + '</td><td class="num">' + fmtMs(d.avg_ttfb_ms) + '</td><td class="num">' + fmtMs(d.avg_duration_ms) + '</td></tr>'
+      '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(Math.max(0, d.prompt_tokens - d.cached_prompt_tokens)) + '</td><td class="num">' + fmt(d.cached_prompt_tokens) + '</td><td class="num">' + fmt(d.completion_tokens) + '</td><td class="num">' + (d.credits == null ? 'N/A' : Number(d.credits).toFixed(2)) + '</td><td class="num">' + (d.cost_usd == null ? 'N/A' : '$' + Number(d.cost_usd).toFixed(4)) + '</td></tr>'
     ).join('');
-    if (!data.length) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
+    if (!data.length) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
   }
 
   async function loadAll() {
+    if (currentMode === 'preset') {
+      const range = periodToRange(currentPeriod);
+      currentStart = range.start;
+      currentEnd = range.end;
+      syncRangeInputs(range.start, range.end);
+    }
     await Promise.all([loadStats(), loadTimeline(), loadModels(), loadTopIps(), loadTopModels()]);
   }
 
@@ -360,6 +382,7 @@ export function getDashboardHtml(): string {
       currentStart = isoStart;
       currentEnd = isoEnd;
       currentGranularity = inferGranularity(isoStart, isoEnd);
+      syncRangeInputs(isoStart, isoEnd);
 
       // Deactivate preset buttons
       document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
@@ -395,6 +418,7 @@ export function getDashboardHtml(): string {
       currentMode = 'preset';
       currentPeriod = btn.dataset.period;
       currentGranularity = '';
+      document.getElementById('range-error').textContent = '';
       // Reset zoom on all charts
       resetAllZoom();
       loadAll();
@@ -413,31 +437,32 @@ export function getDashboardHtml(): string {
   document.getElementById('apply-range').addEventListener('click', () => {
     const startInput = document.getElementById('range-start').value;
     const endInput = document.getElementById('range-end').value;
-    if (!startInput || !endInput) return;
+    const error = document.getElementById('range-error');
+    if (!startInput || !endInput) {
+      error.textContent = 'Choose both start and end time.';
+      return;
+    }
+    if (new Date(startInput).getTime() >= new Date(endInput).getTime()) {
+      error.textContent = 'Start time must be before end time.';
+      return;
+    }
 
+    error.textContent = '';
     currentMode = 'custom';
-    currentStart = startInput.replace('T', 'T') + ':00';
-    currentEnd = endInput.replace('T', 'T') + ':00';
+    currentStart = toUtc(new Date(startInput));
+    currentEnd = toUtc(new Date(endInput));
     currentGranularity = '';
 
-    // Deactivate preset buttons
     document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
     resetAllZoom();
     loadAll();
   });
 
   // ── Init ────────────────────────────────────────────────────
-  // Set default values for datetime inputs
-  (function initDateInputs() {
-    const now = new Date();
-    const yesterday = new Date(now.getTime() - 24 * 3600000);
-    const fmt = (d) => {
-      const pad = (n) => String(n).padStart(2, '0');
-      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-    };
-    document.getElementById('range-start').value = fmt(yesterday);
-    document.getElementById('range-end').value = fmt(now);
-  })();
+  const initialRange = periodToRange(currentPeriod);
+  currentStart = initialRange.start;
+  currentEnd = initialRange.end;
+  syncRangeInputs(initialRange.start, initialRange.end);
 
   loadAll();
   setInterval(() => {

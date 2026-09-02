@@ -327,6 +327,9 @@ export function responsesToChatResponse(
           prompt_tokens: result.usage.input_tokens,
           completion_tokens: result.usage.output_tokens,
           total_tokens: result.usage.total_tokens,
+          prompt_tokens_details: result.usage.input_tokens_details
+            ? { cached_tokens: result.usage.input_tokens_details.cached_tokens }
+            : undefined,
         }
       : undefined,
   };
@@ -388,6 +391,12 @@ export async function* responsesStreamToChatStream(
               prompt_tokens: parsed.response.usage.input_tokens,
               completion_tokens: parsed.response.usage.output_tokens,
               total_tokens: parsed.response.usage.total_tokens,
+              prompt_tokens_details: parsed.response.usage.input_tokens_details
+                ? {
+                    cached_tokens:
+                      parsed.response.usage.input_tokens_details.cached_tokens,
+                  }
+                : undefined,
             }
           : undefined,
       };

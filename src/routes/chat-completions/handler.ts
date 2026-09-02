@@ -66,6 +66,7 @@ export async function handleChatCompletion(c: Context) {
       prompt_tokens: response.usage?.prompt_tokens ?? 0,
       completion_tokens: response.usage?.completion_tokens ?? 0,
       total_tokens: response.usage?.total_tokens ?? 0,
+      cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       stream: false,
       duration_ms: Date.now() - startTime,
       ttfb_ms: Date.now() - startTime,
@@ -82,7 +83,7 @@ export async function handleChatCompletion(c: Context) {
       await stream.writeSSE(chunk as SSEMessage);
       // Track usage from the last chunk that has it
       try {
-        const parsed = JSON.parse((chunk as SSEMessage).data) as ChatCompletionChunk;
+        const parsed = JSON.parse(chunk.data) as ChatCompletionChunk;
         if (parsed.usage) lastUsage = parsed.usage;
       } catch { /* ignore parse errors */ }
     }
@@ -93,6 +94,7 @@ export async function handleChatCompletion(c: Context) {
       prompt_tokens: lastUsage?.prompt_tokens ?? 0,
       completion_tokens: lastUsage?.completion_tokens ?? 0,
       total_tokens: lastUsage?.total_tokens ?? 0,
+      cached_prompt_tokens: lastUsage?.prompt_tokens_details?.cached_tokens ?? 0,
       stream: true,
       duration_ms: Date.now() - startTime,
       ttfb_ms: ttfb,
@@ -126,6 +128,7 @@ async function handleViaResponsesApi(
       prompt_tokens: response.usage?.input_tokens ?? 0,
       completion_tokens: response.usage?.output_tokens ?? 0,
       total_tokens: response.usage?.total_tokens ?? 0,
+      cached_prompt_tokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
       stream: false,
       duration_ms: Date.now() - startTime,
       ttfb_ms: Date.now() - startTime,
@@ -157,6 +160,7 @@ async function handleViaResponsesApi(
       prompt_tokens: lastUsage?.prompt_tokens ?? 0,
       completion_tokens: lastUsage?.completion_tokens ?? 0,
       total_tokens: lastUsage?.total_tokens ?? 0,
+      cached_prompt_tokens: lastUsage?.prompt_tokens_details?.cached_tokens ?? 0,
       stream: true,
       duration_ms: Date.now() - startTime,
       ttfb_ms: ttfb,
