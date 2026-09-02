@@ -7,6 +7,7 @@ import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
 import { logUsage } from "../../lib/db.js";
 import { getClientIp } from "../../lib/ip.js";
+import { hasResponsesOutput } from "../../lib/latency.js";
 import { createResponses } from "../../services/copilot-completions.js";
 import type { ResponsesPayload, ResponsesResult } from "../../types/responses.js";
 import {
@@ -36,7 +37,7 @@ export async function handleResponses(c: Context) {
       total_tokens: 0,
       stream: Boolean(payload.stream),
       duration_ms: Date.now() - startTime,
-      ttfb_ms: Date.now() - startTime,
+      ttfb_ms: 0,
     });
 
     return response;
@@ -59,7 +60,7 @@ export async function handleResponses(c: Context) {
       cached_prompt_tokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
       stream: false,
       duration_ms: Date.now() - startTime,
-      ttfb_ms: Date.now() - startTime,
+      ttfb_ms: 0,
     });
     return c.json(response);
   }
@@ -71,20 +72,21 @@ export async function handleResponses(c: Context) {
     let ttfb = 0;
 
     for await (const sse of response) {
-      if (!ttfb) ttfb = Date.now() - startTime;
+      // Track the first output delta and usage from response.completed.
+      try {
+        const parsed = JSON.parse(sse.data) as ResponseStreamEvent;
+        if (!ttfb && hasResponsesOutput(sse.event, parsed.delta)) {
+          ttfb = Date.now() - startTime;
+        }
+        if (parsed.response?.usage) {
+          lastUsage = parsed.response.usage;
+        }
+      } catch { /* ignore */ }
 
       await stream.writeSSE({
         event: sse.event,
         data: sse.data,
       });
-
-      // Track usage from response.completed event
-      try {
-        const parsed = JSON.parse(sse.data);
-        if (parsed.response?.usage) {
-          lastUsage = parsed.response.usage;
-        }
-      } catch { /* ignore */ }
     }
 
     logUsage({

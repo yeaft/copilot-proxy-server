@@ -92,7 +92,7 @@ export function getDashboardHtml(): string {
       <div class="card"><div class="card-label">Active IPs</div><div class="card-value" id="stat-ips">-</div></div>
       <div class="card"><div class="card-label">Cache Hit Rate</div><div class="card-value" id="stat-cache-rate">-</div><div class="card-sub">Share of input tokens read from cache</div></div>
       <div class="card">
-        <div class="card-label">Avg TTFB</div>
+        <div class="card-label">Avg TTFT</div>
         <div class="card-value" id="stat-ttfb">-</div>
         <div class="card-sub" id="stat-ttfb-pct"></div>
       </div>
@@ -118,7 +118,7 @@ export function getDashboardHtml(): string {
     <!-- Latency charts -->
     <div class="charts">
       <div class="chart-box">
-        <h3>TTFB Over Time</h3>
+        <h3>TTFT Over Time</h3>
         <div class="chart-container" id="chart-ttfb"></div>
       </div>
       <div class="chart-box">
@@ -131,8 +131,9 @@ export function getDashboardHtml(): string {
     <div class="tables">
       <div class="table-box table-wide">
         <h3>Model Performance</h3>
+        <div style="color:#64748b;font-size:12px;margin:-10px 0 12px;">TTFT uses streaming requests with a recorded output token; duration uses all completed requests.</div>
         <table>
-          <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Avg TTFB</th><th class="num">P50 TTFB</th><th class="num">P95 TTFB</th><th class="num">Avg Duration</th></tr></thead>
+          <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">TTFT Samples</th><th class="num">Avg TTFT</th><th class="num">P50 TTFT</th><th class="num">P95 TTFT</th><th class="num">Avg Duration</th></tr></thead>
           <tbody id="table-model-performance"></tbody>
         </table>
       </div>
@@ -311,7 +312,7 @@ export function getDashboardHtml(): string {
     }, true);
 
     if (!ttfbChart) ttfbChart = echarts.init(document.getElementById('chart-ttfb'));
-    ttfbChart.setOption(makeLatencyOption(data, 'avg_ttfb_ms', '#f59e0b', 'Avg TTFB'), true);
+    ttfbChart.setOption(makeLatencyOption(data, 'avg_ttfb_ms', '#f59e0b', 'Avg TTFT'), true);
 
     if (!durationChart) durationChart = echarts.init(document.getElementById('chart-duration'));
     durationChart.setOption(makeLatencyOption(data, 'avg_duration_ms', '#8b5cf6', 'Avg Duration'), true);
@@ -347,9 +348,9 @@ export function getDashboardHtml(): string {
     const data = await fetchJSON('/dashboard/api/top-models?' + buildQuery());
     const performanceBody = document.getElementById('table-model-performance');
     performanceBody.innerHTML = data.map(d =>
-      '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmtMs(d.avg_ttfb_ms) + '</td><td class="num">' + fmtMs(d.p50_ttfb_ms) + '</td><td class="num">' + fmtMs(d.p95_ttfb_ms) + '</td><td class="num">' + fmtMs(d.avg_duration_ms) + '</td></tr>'
+      '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(d.ttfb_samples) + '</td><td class="num">' + fmtMs(d.avg_ttfb_ms) + '</td><td class="num">' + fmtMs(d.p50_ttfb_ms) + '</td><td class="num">' + fmtMs(d.p95_ttfb_ms) + '</td><td class="num">' + fmtMs(d.avg_duration_ms) + '</td></tr>'
     ).join('');
-    if (!data.length) performanceBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
+    if (!data.length) performanceBody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
 
     const consumptionBody = document.getElementById('table-models');
     consumptionBody.innerHTML = data.map(consumptionRow).join('');

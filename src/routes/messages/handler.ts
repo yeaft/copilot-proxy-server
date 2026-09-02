@@ -7,6 +7,7 @@ import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
 import { logUsage } from "../../lib/db.js";
 import { getClientIp } from "../../lib/ip.js";
+import { hasChatOutput } from "../../lib/latency.js";
 import { createChatCompletions } from "../../services/copilot-completions.js";
 import {
   createDeepseekCompletion,
@@ -58,7 +59,7 @@ export async function handleMessagesCompletion(c: Context) {
       cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       stream: false,
       duration_ms: Date.now() - startTime,
-      ttfb_ms: Date.now() - startTime,
+      ttfb_ms: 0,
     });
     return c.json(anthropicResponse);
   }
@@ -76,9 +77,9 @@ export async function handleMessagesCompletion(c: Context) {
 
     for await (const rawEvent of response) {
       if (!rawEvent.data) continue;
-      if (!ttfb) ttfb = Date.now() - startTime;
 
       const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk;
+      if (!ttfb && hasChatOutput(chunk)) ttfb = Date.now() - startTime;
       if (chunk.usage) lastUsage = chunk.usage;
       const events = translateChunkToAnthropicEvents(chunk, streamState);
 
@@ -129,7 +130,7 @@ async function handleDeepseekCompletion(
     total_tokens: 0,
     stream: Boolean(anthropicPayload.stream),
     duration_ms: Date.now() - startTime,
-    ttfb_ms: Date.now() - startTime,
+    ttfb_ms: 0,
   });
 
   return response;

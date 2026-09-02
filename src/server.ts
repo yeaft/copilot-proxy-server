@@ -27,7 +27,7 @@ app.use("*", async (c, next) => {
     return next();
   }
 
-  // Skip API key auth for dashboard (has its own Basic Auth)
+  // Skip API key auth for dashboard (has its own cookie session)
   if (c.req.path.startsWith("/dashboard")) {
     return next();
   }
@@ -129,7 +129,7 @@ app.route("/v1/messages", messageRoutes);
 // Gemini-compatible endpoints
 app.route("/", geminiRoutes);
 
-// Dashboard (protected by Basic Auth)
+// Dashboard (protected by a persistent cookie session)
 app.route("/dashboard", dashboardRoutes);
 
 // Playground (public HTML, API subpaths require API key)

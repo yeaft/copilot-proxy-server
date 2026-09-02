@@ -7,6 +7,7 @@ import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
 import { logUsage } from "../../lib/db.js";
 import { getClientIp } from "../../lib/ip.js";
+import { hasChatOutput } from "../../lib/latency.js";
 import {
   createChatCompletions,
   shouldUseResponsesApi,
@@ -69,7 +70,7 @@ export async function handleChatCompletion(c: Context) {
       cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       stream: false,
       duration_ms: Date.now() - startTime,
-      ttfb_ms: Date.now() - startTime,
+      ttfb_ms: 0,
     });
     return c.json(response);
   }
@@ -79,13 +80,13 @@ export async function handleChatCompletion(c: Context) {
     let lastUsage: ChatCompletionChunk["usage"] | undefined;
     let ttfb = 0;
     for await (const chunk of response) {
-      if (!ttfb) ttfb = Date.now() - startTime;
-      await stream.writeSSE(chunk as SSEMessage);
-      // Track usage from the last chunk that has it
+      // Track usage and the first user-visible output chunk.
       try {
         const parsed = JSON.parse(chunk.data) as ChatCompletionChunk;
+        if (!ttfb && hasChatOutput(parsed)) ttfb = Date.now() - startTime;
         if (parsed.usage) lastUsage = parsed.usage;
       } catch { /* ignore parse errors */ }
+      await stream.writeSSE(chunk as SSEMessage);
     }
     logUsage({
       ip,
@@ -131,7 +132,7 @@ async function handleViaResponsesApi(
       cached_prompt_tokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
       stream: false,
       duration_ms: Date.now() - startTime,
-      ttfb_ms: Date.now() - startTime,
+      ttfb_ms: 0,
     });
     return c.json(chatResponse);
   }
@@ -144,13 +145,12 @@ async function handleViaResponsesApi(
     let ttfb = 0;
 
     for await (const chunk of chatStream) {
-      if (!ttfb) ttfb = Date.now() - startTime;
-      await stream.writeSSE({ data: chunk.data });
-
       try {
         const parsed = JSON.parse(chunk.data) as ChatCompletionChunk;
+        if (!ttfb && hasChatOutput(parsed)) ttfb = Date.now() - startTime;
         if (parsed.usage) lastUsage = parsed.usage;
       } catch { /* ignore */ }
+      await stream.writeSSE({ data: chunk.data });
     }
 
     logUsage({
@@ -187,7 +187,7 @@ async function handleDeepseekChatCompletion(
     total_tokens: 0,
     stream: Boolean(payload.stream),
     duration_ms: Date.now() - startTime,
-    ttfb_ms: Date.now() - startTime,
+    ttfb_ms: 0,
   });
 
   return response;

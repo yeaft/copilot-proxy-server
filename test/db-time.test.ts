@@ -79,6 +79,9 @@ test("reports per-model latency percentiles and prices IP usage per model", asyn
       ["2026-09-02 08:00:00", "client-a", "gpt-5.6-sol", "openai", 1_000_000, 0, 1_000_000, 0, 1, 1_000, 100],
       ["2026-09-02 08:01:00", "client-a", "gpt-5.6-sol", "openai", 0, 0, 0, 0, 1, 2_000, 200],
       ["2026-09-02 08:02:00", "client-a", "gpt-5.6-sol", "openai", 0, 0, 0, 0, 1, 3_000, 300],
+      // Legacy non-streaming rows incorrectly stored duration as TTFB. They must
+      // not contaminate TTFT aggregates.
+      ["2026-09-02 08:02:30", "client-a", "gpt-5.6-sol", "openai", 0, 0, 0, 0, 0, 9_000, 9_000],
       ["2026-09-02 08:03:00", "client-a", "gpt-5.6-sol-fast", "openai", 1_000_000, 0, 1_000_000, 0, 1, 4_000, 400],
     ];
     for (const row of rows) insert.run(row);
@@ -91,10 +94,12 @@ test("reports per-model latency percentiles and prices IP usage per model", asyn
     const models = getTopModels(range);
     const sol = models.find((entry) => entry.name === "gpt-5.6-sol");
     assert.ok(sol);
+    assert.equal(sol.ttfb_samples, 3);
     assert.equal(sol.avg_ttfb_ms, 200);
     assert.equal(sol.p50_ttfb_ms, 200);
     assert.equal(sol.p95_ttfb_ms, 300);
-    assert.equal(sol.avg_duration_ms, 2_000);
+    assert.equal(sol.avg_duration_ms, 3_750);
+    assert.equal(getStatsOverview(range).avg_ttfb_ms, 250);
 
     const ip = getTopIps(range)[0];
     assert.equal(ip.name, "client-a");

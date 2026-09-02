@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { basicAuth } from "hono/basic-auth";
 
 import {
   getStatsOverview,
@@ -9,18 +8,18 @@ import {
   periodToTimeRange,
   type TimeRange,
 } from "../../lib/db.js";
+import { createDashboardAuth } from "./auth.js";
 import { getDashboardHtml } from "./page.js";
 
 const dashboardUser = process.env.DASHBOARD_USER || "admin";
 const dashboardPass = process.env.DASHBOARD_PASS || "admin";
+const dashboardAuth = createDashboardAuth(dashboardUser, dashboardPass);
 
 export const dashboardRoutes = new Hono();
 
-// Basic Auth for all dashboard routes
-dashboardRoutes.use(
-  "*",
-  basicAuth({ username: dashboardUser, password: dashboardPass })
-);
+dashboardRoutes.get("/login", (c) => c.html(dashboardAuth.loginPage()));
+dashboardRoutes.post("/login", dashboardAuth.login);
+dashboardRoutes.use("*", dashboardAuth.middleware);
 
 /** Parse time range from query params. Supports both preset period and custom start/end. */
 function parseTimeRange(c: { req: { query: (k: string) => string | undefined } }): TimeRange {

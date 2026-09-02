@@ -8,6 +8,7 @@ import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
 import { logUsage } from "../../lib/db.js";
 import { getClientIp } from "../../lib/ip.js";
+import { hasChatOutput } from "../../lib/latency.js";
 import { createChatCompletions } from "../../services/copilot-completions.js";
 import type {
   ChatCompletionChunk,
@@ -66,7 +67,7 @@ geminiRoutes.post(
         cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
         stream: false,
         duration_ms: Date.now() - startTime,
-        ttfb_ms: Date.now() - startTime,
+        ttfb_ms: 0,
       });
 
       return c.json(geminiResponse, 200);
@@ -118,7 +119,7 @@ geminiRoutes.post(
           cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
           stream: false,
           duration_ms: Date.now() - startTime,
-          ttfb_ms: Date.now() - startTime,
+          ttfb_ms: 0,
         });
         return c.json(geminiResponse, 200);
       }
@@ -128,9 +129,9 @@ geminiRoutes.post(
         let ttfb = 0;
         for await (const rawEvent of response) {
           if (!rawEvent.data) continue;
-          if (!ttfb) ttfb = Date.now() - startTime;
 
           const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk;
+          if (!ttfb && hasChatOutput(chunk)) ttfb = Date.now() - startTime;
           if (chunk.usage) lastUsage = chunk.usage;
           const geminiChunk = translateOpenAIChunkToGemini(chunk, modelId);
 

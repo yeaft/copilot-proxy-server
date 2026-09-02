@@ -15,7 +15,7 @@ export interface UsageRecord {
   cached_prompt_tokens?: number;
   stream: boolean;
   duration_ms: number;
-  ttfb_ms: number; // Time to first byte/token (0 for non-streaming)
+  ttfb_ms: number; // Time to first output token (legacy column name; 0 when unavailable)
 }
 
 let db: SqlJsDatabase | null = null;
@@ -276,7 +276,7 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
       COALESCE(SUM(cached_prompt_tokens), 0) as total_cached_prompt_tokens,
       COALESCE(SUM(total_tokens), 0) as total_tokens,
       COUNT(DISTINCT ip) as active_ips,
-      COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
+      COALESCE(AVG(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
     WHERE ${whereClause}`,
@@ -286,8 +286,8 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
   // Compute percentiles via sorted subqueries
   const ttfbPercentiles = queryOne<{ p50: number; p95: number }>(
     `SELECT
-      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE ${whereClause} AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause} AND ttfb_ms > 0)), 0) as p50,
-      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE ${whereClause} AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause} AND ttfb_ms > 0)), 0) as p95`,
+      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE ${whereClause} AND stream = 1 AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause} AND stream = 1 AND ttfb_ms > 0)), 0) as p50,
+      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE ${whereClause} AND stream = 1 AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause} AND stream = 1 AND ttfb_ms > 0)), 0) as p95`,
     [...whereParams, ...whereParams, ...whereParams, ...whereParams]
   );
 
@@ -361,7 +361,7 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
         COALESCE(SUM(completion_tokens), 0) as completion_tokens,
         COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
         COALESCE(SUM(total_tokens), 0) as total_tokens,
-        COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
+        COALESCE(AVG(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
         COALESCE(AVG(duration_ms), 0) as avg_duration_ms
       FROM usage_logs
       WHERE timestamp >= ? AND timestamp <= ?
@@ -379,7 +379,7 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
       COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
       COALESCE(SUM(total_tokens), 0) as total_tokens,
-      COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
+      COALESCE(AVG(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
     WHERE timestamp >= ? AND timestamp <= ?
@@ -399,6 +399,7 @@ export interface TopEntry {
   credits?: number | null;
   cost_usd?: number | null;
   avg_ttfb_ms: number;
+  ttfb_samples?: number;
   p50_ttfb_ms?: number;
   p95_ttfb_ms?: number;
   avg_duration_ms: number;
@@ -469,11 +470,12 @@ export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
     `SELECT
       model as name,
       COUNT(*) as requests,
+      COUNT(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN 1 END) as ttfb_samples,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
       COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
       COALESCE(SUM(total_tokens), 0) as total_tokens,
-      COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
+      COALESCE(AVG(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
       COALESCE(AVG(duration_ms), 0) as avg_duration_ms
     FROM usage_logs
     WHERE timestamp >= ? AND timestamp <= ?
@@ -494,7 +496,7 @@ export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
             COUNT(*) OVER (PARTITION BY model) as sample_count
           FROM usage_logs
           WHERE timestamp >= ? AND timestamp <= ?
-            AND ttfb_ms > 0
+            AND stream = 1 AND ttfb_ms > 0
             AND model IN (${modelNames.map(() => "?").join(", ")})
         )
         SELECT
