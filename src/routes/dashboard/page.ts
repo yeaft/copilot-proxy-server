@@ -43,6 +43,7 @@ export function getDashboardHtml(): string {
     .chart-container { width: 100%; height: 320px; }
     .tables { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .table-box { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; overflow-x: auto; }
+    .table-wide { grid-column: 1 / -1; }
     .table-box h3 { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: #cbd5e1; }
     table { width: 100%; border-collapse: collapse; }
     th { text-align: left; padding: 8px 12px; font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #334155; white-space: nowrap; }
@@ -128,18 +129,25 @@ export function getDashboardHtml(): string {
 
     <!-- Tables -->
     <div class="tables">
-      <div class="table-box">
-        <h3>Top IPs</h3>
+      <div class="table-box table-wide">
+        <h3>Model Performance</h3>
         <table>
-          <thead><tr><th>IP</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num">Avg TTFB</th><th class="num">Avg Duration</th></tr></thead>
-          <tbody id="table-ips"></tbody>
+          <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Avg TTFB</th><th class="num">P50 TTFB</th><th class="num">P95 TTFB</th><th class="num">Avg Duration</th></tr></thead>
+          <tbody id="table-model-performance"></tbody>
         </table>
       </div>
       <div class="table-box">
-        <h3>Top Models</h3>
+        <h3>Model Consumption</h3>
         <table>
           <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Cache Read</th><th class="num">Output</th><th class="num">Credits</th><th class="num">Cost</th></tr></thead>
           <tbody id="table-models"></tbody>
+        </table>
+      </div>
+      <div class="table-box">
+        <h3>IP Consumption</h3>
+        <table>
+          <thead><tr><th>IP</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Cache Read</th><th class="num">Output</th><th class="num">Credits</th><th class="num">Cost</th></tr></thead>
+          <tbody id="table-ips"></tbody>
         </table>
       </div>
     </div>
@@ -324,22 +332,28 @@ export function getDashboardHtml(): string {
     });
   }
 
+  function consumptionRow(d) {
+    return '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(Math.max(0, d.prompt_tokens - d.cached_prompt_tokens)) + '</td><td class="num">' + fmt(d.cached_prompt_tokens) + '</td><td class="num">' + fmt(d.completion_tokens) + '</td><td class="num">' + (d.credits == null ? 'N/A' : Number(d.credits).toFixed(2)) + '</td><td class="num">' + (d.cost_usd == null ? 'N/A' : '$' + Number(d.cost_usd).toFixed(2)) + '</td></tr>';
+  }
+
   async function loadTopIps() {
     const data = await fetchJSON('/dashboard/api/top-ips?' + buildQuery());
     const tbody = document.getElementById('table-ips');
-    tbody.innerHTML = data.map(d =>
-      '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(d.total_tokens) + '</td><td class="num">' + fmtMs(d.avg_ttfb_ms) + '</td><td class="num">' + fmtMs(d.avg_duration_ms) + '</td></tr>'
-    ).join('');
-    if (!data.length) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
+    tbody.innerHTML = data.map(consumptionRow).join('');
+    if (!data.length) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
   }
 
   async function loadTopModels() {
     const data = await fetchJSON('/dashboard/api/top-models?' + buildQuery());
-    const tbody = document.getElementById('table-models');
-    tbody.innerHTML = data.map(d =>
-      '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(Math.max(0, d.prompt_tokens - d.cached_prompt_tokens)) + '</td><td class="num">' + fmt(d.cached_prompt_tokens) + '</td><td class="num">' + fmt(d.completion_tokens) + '</td><td class="num">' + (d.credits == null ? 'N/A' : Number(d.credits).toFixed(2)) + '</td><td class="num">' + (d.cost_usd == null ? 'N/A' : '$' + Number(d.cost_usd).toFixed(2)) + '</td></tr>'
+    const performanceBody = document.getElementById('table-model-performance');
+    performanceBody.innerHTML = data.map(d =>
+      '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmtMs(d.avg_ttfb_ms) + '</td><td class="num">' + fmtMs(d.p50_ttfb_ms) + '</td><td class="num">' + fmtMs(d.p95_ttfb_ms) + '</td><td class="num">' + fmtMs(d.avg_duration_ms) + '</td></tr>'
     ).join('');
-    if (!data.length) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
+    if (!data.length) performanceBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
+
+    const consumptionBody = document.getElementById('table-models');
+    consumptionBody.innerHTML = data.map(consumptionRow).join('');
+    if (!data.length) consumptionBody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
   }
 
   async function loadAll() {

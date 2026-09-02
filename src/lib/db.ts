@@ -399,28 +399,68 @@ export interface TopEntry {
   credits?: number | null;
   cost_usd?: number | null;
   avg_ttfb_ms: number;
+  p50_ttfb_ms?: number;
+  p95_ttfb_ms?: number;
   avg_duration_ms: number;
+}
+
+interface TopIpModelEntry extends TopEntry {
+  model: string;
 }
 
 export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
   const { start, end } = normalizeTimeRange(range);
-  return queryAll<TopEntry>(
+  // Pricing is model-specific. Grouping directly by IP would apply the wrong rate
+  // when one client uses multiple models.
+  const rows = queryAll<TopIpModelEntry>(
     `SELECT
       ip as name,
+      model,
       COUNT(*) as requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
       COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
       COALESCE(SUM(total_tokens), 0) as total_tokens,
-      COALESCE(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
-      COALESCE(AVG(duration_ms), 0) as avg_duration_ms
+      0 as avg_ttfb_ms,
+      0 as avg_duration_ms
     FROM usage_logs
     WHERE timestamp >= ? AND timestamp <= ?
-    GROUP BY ip
-    ORDER BY total_tokens DESC
-    LIMIT ?`,
-    [start, end, limit]
+    GROUP BY ip, model`,
+    [start, end]
   );
+
+  const byIp = new Map<string, TopEntry>();
+  for (const row of rows) {
+    const entry = byIp.get(row.name) ?? {
+      name: row.name,
+      requests: 0,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      cached_prompt_tokens: 0,
+      total_tokens: 0,
+      credits: 0,
+      cost_usd: 0,
+      avg_ttfb_ms: 0,
+      avg_duration_ms: 0,
+    };
+    const cost = calculateUsageCost(row.model, row);
+    entry.requests += row.requests;
+    entry.prompt_tokens += row.prompt_tokens;
+    entry.completion_tokens += row.completion_tokens;
+    entry.cached_prompt_tokens += row.cached_prompt_tokens;
+    entry.total_tokens += row.total_tokens;
+    entry.credits = cost.priced && entry.credits !== null
+      ? (entry.credits ?? 0) + cost.credits
+      : null;
+    entry.cost_usd = cost.priced && entry.cost_usd !== null
+      ? (entry.cost_usd ?? 0) + cost.usd
+      : null;
+    byIp.set(row.name, entry);
+  }
+
+  return [...byIp.values()]
+    .sort((a, b) => b.total_tokens - a.total_tokens)
+    .slice(0, limit);
 }
 
 export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
@@ -442,10 +482,39 @@ export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
     LIMIT ?`,
     [start, end, limit]
   );
+
+  const modelNames = rows.map((row) => row.name);
+  const percentiles = modelNames.length
+    ? queryAll<{ model: string; p50_ttfb_ms: number; p95_ttfb_ms: number }>(
+        `WITH ranked AS (
+          SELECT
+            model,
+            ttfb_ms,
+            ROW_NUMBER() OVER (PARTITION BY model ORDER BY ttfb_ms) as row_num,
+            COUNT(*) OVER (PARTITION BY model) as sample_count
+          FROM usage_logs
+          WHERE timestamp >= ? AND timestamp <= ?
+            AND ttfb_ms > 0
+            AND model IN (${modelNames.map(() => "?").join(", ")})
+        )
+        SELECT
+          model,
+          MAX(CASE WHEN row_num = CAST((sample_count * 50 + 99) / 100 AS INTEGER) THEN ttfb_ms END) as p50_ttfb_ms,
+          MAX(CASE WHEN row_num = CAST((sample_count * 95 + 99) / 100 AS INTEGER) THEN ttfb_ms END) as p95_ttfb_ms
+        FROM ranked
+        GROUP BY model`,
+        [start, end, ...modelNames]
+      )
+    : [];
+  const percentileByModel = new Map(percentiles.map((row) => [row.model, row]));
+
   return rows.map((row) => {
     const cost = calculateUsageCost(row.name, row);
+    const percentile = percentileByModel.get(row.name);
     return {
       ...row,
+      p50_ttfb_ms: percentile?.p50_ttfb_ms ?? 0,
+      p95_ttfb_ms: percentile?.p95_ttfb_ms ?? 0,
       credits: cost.priced ? cost.credits : null,
       cost_usd: cost.priced ? cost.usd : null,
     };
