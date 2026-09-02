@@ -27,15 +27,25 @@ function parseTimeRange(c: { req: { query: (k: string) => string | undefined } }
   const start = c.req.query("start");
   const end = c.req.query("end");
   const granularity = c.req.query("granularity");
+  const timezoneOffset = Number(c.req.query("tzOffset"));
+  const timezoneOffsetMinutes = Number.isFinite(timezoneOffset)
+    ? Math.max(-840, Math.min(840, Math.trunc(timezoneOffset)))
+    : undefined;
 
   if (start && end) {
-    return { start, end, granularity: granularity || undefined };
+    return {
+      start,
+      end,
+      granularity: granularity || undefined,
+      timezoneOffsetMinutes,
+    };
   }
 
   // Fallback to preset period
   const period = c.req.query("period") || "24h";
   const range = periodToTimeRange(period);
   if (granularity) range.granularity = granularity;
+  range.timezoneOffsetMinutes = timezoneOffsetMinutes;
   return range;
 }
 

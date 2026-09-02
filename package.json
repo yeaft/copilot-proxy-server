@@ -9,6 +9,7 @@
     "build": "tsup",
     "start": "node dist/index.js",
     "auth": "tsx src/index.ts --auth",
+    "test": "node --import tsx --test test/*.test.ts",
     "test:api": "node scripts/test-api.mjs",
     "bench": "node scripts/bench-latency.mjs",
     "bench:quick": "node scripts/bench-latency.mjs --rounds 3 --prompt-size short",

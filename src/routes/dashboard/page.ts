@@ -31,7 +31,7 @@ export function getDashboardHtml(): string {
     .range-error { color: #f87171; font-size: 12px; min-height: 16px; }
     .granularity-label { font-size: 12px; color: #64748b; padding: 4px 10px; background: #334155; border-radius: 4px; }
     .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; margin-bottom: 24px; }
     .card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
     .card-label { font-size: 13px; color: #94a3b8; margin-bottom: 8px; }
     .card-value { font-size: 28px; font-weight: 700; color: #f1f5f9; }
@@ -49,8 +49,9 @@ export function getDashboardHtml(): string {
     td { padding: 10px 12px; font-size: 13px; border-bottom: 1px solid #1e293b; white-space: nowrap; }
     tr:hover td { background: #334155; }
     .num { font-variant-numeric: tabular-nums; text-align: right; }
+    @media (max-width: 1100px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 768px) {
-      .charts, .charts-wide, .tables { grid-template-columns: 1fr; }
+      .cards, .charts, .charts-wide, .tables { grid-template-columns: 1fr; }
       .header { flex-direction: column; gap: 12px; }
       .header-controls { flex-direction: column; align-items: flex-start; }
     }
@@ -88,6 +89,7 @@ export function getDashboardHtml(): string {
       <div class="card"><div class="card-label">Total Tokens</div><div class="card-value" id="stat-tokens">-</div></div>
       <div class="card"><div class="card-label">Estimated Cost</div><div class="card-value" id="stat-cost">-</div><div class="card-sub" id="stat-credits"></div></div>
       <div class="card"><div class="card-label">Active IPs</div><div class="card-value" id="stat-ips">-</div></div>
+      <div class="card"><div class="card-label">Cache Hit Rate</div><div class="card-value" id="stat-cache-rate">-</div><div class="card-sub">Share of input tokens read from cache</div></div>
       <div class="card">
         <div class="card-label">Avg TTFB</div>
         <div class="card-value" id="stat-ttfb">-</div>
@@ -184,12 +186,12 @@ export function getDashboardHtml(): string {
   }
 
   function toUtc(d) {
-    return d.toISOString().slice(0, 19);
+    return d.toISOString().slice(0, 19) + 'Z';
   }
 
   function syncRangeInputs(start, end) {
-    document.getElementById('range-start').value = toLocal(new Date(start + 'Z')).slice(0, 16);
-    document.getElementById('range-end').value = toLocal(new Date(end + 'Z')).slice(0, 16);
+    document.getElementById('range-start').value = toLocal(new Date(start)).slice(0, 16);
+    document.getElementById('range-end').value = toLocal(new Date(end)).slice(0, 16);
   }
 
   function toLocal(d) {
@@ -221,7 +223,8 @@ export function getDashboardHtml(): string {
     const g = currentGranularity || inferGranularity(start, end);
     // Update granularity label
     document.getElementById('granularity-label').textContent = 'Granularity: ' + (granularityNames[g] || g);
-    return 'start=' + encodeURIComponent(start) + '&end=' + encodeURIComponent(end) + '&granularity=' + g;
+    return 'start=' + encodeURIComponent(start) + '&end=' + encodeURIComponent(end) + '&granularity=' + g
+      + '&tzOffset=' + new Date().getTimezoneOffset();
   }
 
   // ── Fetch helper ────────────────────────────────────────────
@@ -238,9 +241,13 @@ export function getDashboardHtml(): string {
     document.getElementById('stat-cached-tokens').textContent = fmt(s.total_cached_prompt_tokens);
     document.getElementById('stat-output-tokens').textContent = fmt(s.total_completion_tokens);
     document.getElementById('stat-tokens').textContent = fmt(s.total_tokens);
-    document.getElementById('stat-cost').textContent = '$' + Number(s.total_cost_usd).toFixed(4);
+    document.getElementById('stat-cost').textContent = '$' + Number(s.total_cost_usd).toFixed(2);
     document.getElementById('stat-credits').textContent = Number(s.total_credits).toFixed(2) + ' credits' + (s.unpriced_tokens ? ' · ' + fmt(s.unpriced_tokens) + ' unpriced tokens' : '');
     document.getElementById('stat-ips').textContent = s.active_ips;
+    const cacheRate = s.total_prompt_tokens > 0
+      ? Math.min(100, Math.max(0, s.total_cached_prompt_tokens / s.total_prompt_tokens * 100))
+      : 0;
+    document.getElementById('stat-cache-rate').textContent = cacheRate.toFixed(1) + '%';
     document.getElementById('stat-ttfb').textContent = fmtMs(s.avg_ttfb_ms);
     document.getElementById('stat-ttfb-pct').textContent = 'P50: ' + fmtMs(s.p50_ttfb_ms) + '  P95: ' + fmtMs(s.p95_ttfb_ms);
     document.getElementById('stat-duration').textContent = fmtMs(s.avg_duration_ms);
@@ -330,7 +337,7 @@ export function getDashboardHtml(): string {
     const data = await fetchJSON('/dashboard/api/top-models?' + buildQuery());
     const tbody = document.getElementById('table-models');
     tbody.innerHTML = data.map(d =>
-      '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(Math.max(0, d.prompt_tokens - d.cached_prompt_tokens)) + '</td><td class="num">' + fmt(d.cached_prompt_tokens) + '</td><td class="num">' + fmt(d.completion_tokens) + '</td><td class="num">' + (d.credits == null ? 'N/A' : Number(d.credits).toFixed(2)) + '</td><td class="num">' + (d.cost_usd == null ? 'N/A' : '$' + Number(d.cost_usd).toFixed(4)) + '</td></tr>'
+      '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(Math.max(0, d.prompt_tokens - d.cached_prompt_tokens)) + '</td><td class="num">' + fmt(d.cached_prompt_tokens) + '</td><td class="num">' + fmt(d.completion_tokens) + '</td><td class="num">' + (d.credits == null ? 'N/A' : Number(d.credits).toFixed(2)) + '</td><td class="num">' + (d.cost_usd == null ? 'N/A' : '$' + Number(d.cost_usd).toFixed(2)) + '</td></tr>'
     ).join('');
     if (!data.length) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
   }
@@ -379,10 +386,10 @@ export function getDashboardHtml(): string {
     clearTimeout(zoomDebounce);
     zoomDebounce = setTimeout(() => {
       currentMode = 'zoom';
-      currentStart = isoStart;
-      currentEnd = isoEnd;
-      currentGranularity = inferGranularity(isoStart, isoEnd);
-      syncRangeInputs(isoStart, isoEnd);
+      currentStart = toUtc(new Date(isoStart));
+      currentEnd = toUtc(new Date(isoEnd));
+      currentGranularity = inferGranularity(currentStart, currentEnd);
+      syncRangeInputs(currentStart, currentEnd);
 
       // Deactivate preset buttons
       document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));

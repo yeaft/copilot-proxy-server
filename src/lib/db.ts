@@ -133,12 +133,32 @@ export function getDb(): SqlJsDatabase {
 
 /** Query time range parameters */
 export interface TimeRange {
-  start: string; // ISO datetime e.g. '2026-04-01T00:00:00'
-  end: string;   // ISO datetime e.g. '2026-04-03T00:00:00'
+  start: string; // ISO datetime; timestamps without an offset are interpreted as UTC
+  end: string;
   granularity?: string; // '1m' | '5m' | '1h' | '1d' — auto-inferred if omitted
+  timezoneOffsetMinutes?: number; // Browser getTimezoneOffset(), used for local chart buckets
 }
 
-/** Convert a preset period string to a TimeRange (end = now) */
+/** Convert an ISO timestamp to the UTC text format stored by SQLite datetime('now'). */
+export function toSqliteUtcTimestamp(value: string): string {
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
+  const isoValue = value.includes("T") ? value : value.replace(" ", "T");
+  const parsed = new Date(hasTimezone ? isoValue : `${isoValue}Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`Invalid timestamp: ${value}`);
+  }
+  return parsed.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function normalizeTimeRange(range: TimeRange): TimeRange {
+  return {
+    ...range,
+    start: toSqliteUtcTimestamp(range.start),
+    end: toSqliteUtcTimestamp(range.end),
+  };
+}
+
+/** Convert a preset period string to a TimeRange (end = now). */
 export function periodToTimeRange(period: string): TimeRange {
   const hours: Record<string, number> = {
     "1h": 1,
@@ -151,14 +171,15 @@ export function periodToTimeRange(period: string): TimeRange {
   const now = new Date();
   const start = new Date(now.getTime() - h * 3600_000);
   return {
-    start: start.toISOString().slice(0, 19),
-    end: now.toISOString().slice(0, 19),
+    start: toSqliteUtcTimestamp(start.toISOString()),
+    end: toSqliteUtcTimestamp(now.toISOString()),
   };
 }
 
 /** Infer granularity from time range span */
 function inferGranularity(start: string, end: string): string {
-  const spanMs = new Date(end).getTime() - new Date(start).getTime();
+  const spanMs = new Date(toSqliteUtcTimestamp(end) + "Z").getTime()
+    - new Date(toSqliteUtcTimestamp(start) + "Z").getTime();
   const spanHours = spanMs / 3600_000;
   if (spanHours <= 3) return "1m";
   if (spanHours <= 24) return "5m";
@@ -186,6 +207,11 @@ function granularityToStrftime(granularity: string): string {
 /** Resolve granularity (use provided or auto-infer) */
 function resolveGranularity(range: TimeRange): string {
   return range.granularity || inferGranularity(range.start, range.end);
+}
+
+function timezoneModifier(range: TimeRange): string {
+  const offset = Math.max(-840, Math.min(840, Math.trunc(range.timezoneOffsetMinutes ?? 0)));
+  return `${-offset} minutes`;
 }
 
 function queryAll<T>(sql: string, params: unknown[] = []): T[] {
@@ -229,7 +255,7 @@ export interface StatsOverview {
 }
 
 export function getStatsOverview(range: TimeRange): StatsOverview {
-  const { start, end } = range;
+  const { start, end } = normalizeTimeRange(range);
   const whereClause = `timestamp >= ? AND timestamp <= ?`;
   const whereParams = [start, end];
 
@@ -319,15 +345,17 @@ export interface TimeSeriesPoint {
 }
 
 export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
-  const { start, end } = range;
-  const granularity = resolveGranularity(range);
+  const normalizedRange = normalizeTimeRange(range);
+  const { start, end } = normalizedRange;
+  const granularity = resolveGranularity(normalizedRange);
   const strftime = granularityToStrftime(granularity);
+  const tzModifier = timezoneModifier(normalizedRange);
 
   if (granularity === "5m") {
     // 5-minute bucketing: truncate minutes to nearest 5
     return queryAll<TimeSeriesPoint>(
       `SELECT
-        strftime('%Y-%m-%d %H:', timestamp) || printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / 5) * 5) as time_bucket,
+        strftime('%Y-%m-%d %H:', timestamp, ?) || printf('%02d', (CAST(strftime('%M', timestamp, ?) AS INTEGER) / 5) * 5) as time_bucket,
         COUNT(*) as requests,
         COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
         COALESCE(SUM(completion_tokens), 0) as completion_tokens,
@@ -339,13 +367,13 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
       WHERE timestamp >= ? AND timestamp <= ?
       GROUP BY time_bucket
       ORDER BY time_bucket`,
-      [start, end]
+      [tzModifier, tzModifier, start, end]
     );
   }
 
   return queryAll<TimeSeriesPoint>(
     `SELECT
-      strftime('${strftime}', timestamp) as time_bucket,
+      strftime('${strftime}', timestamp, ?) as time_bucket,
       COUNT(*) as requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
@@ -357,7 +385,7 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
     WHERE timestamp >= ? AND timestamp <= ?
     GROUP BY time_bucket
     ORDER BY time_bucket`,
-    [start, end]
+    [tzModifier, start, end]
   );
 }
 
@@ -375,7 +403,7 @@ export interface TopEntry {
 }
 
 export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
-  const { start, end } = range;
+  const { start, end } = normalizeTimeRange(range);
   return queryAll<TopEntry>(
     `SELECT
       ip as name,
@@ -396,7 +424,7 @@ export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
 }
 
 export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
-  const { start, end } = range;
+  const { start, end } = normalizeTimeRange(range);
   const rows = queryAll<TopEntry>(
     `SELECT
       model as name,
