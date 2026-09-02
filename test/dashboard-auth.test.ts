@@ -6,12 +6,15 @@ import { createDashboardAuth } from "../src/routes/dashboard/auth.js";
 
 function createApp() {
   const auth = createDashboardAuth("admin", "secret");
+  const dashboardRoutes = new Hono();
+  dashboardRoutes.get("/login", (c) => c.html(auth.loginPage()));
+  dashboardRoutes.post("/login", auth.login);
+  dashboardRoutes.use("*", auth.middleware);
+  dashboardRoutes.get("/", (c) => c.text("dashboard"));
+  dashboardRoutes.get("/api/stats", (c) => c.json({ ok: true }));
+
   const app = new Hono();
-  app.get("/dashboard/login", (c) => c.html(auth.loginPage()));
-  app.post("/dashboard/login", auth.login);
-  app.use("/dashboard/*", auth.middleware);
-  app.get("/dashboard/", (c) => c.text("dashboard"));
-  app.get("/dashboard/api/stats", (c) => c.json({ ok: true }));
+  app.route("/dashboard", dashboardRoutes);
   return app;
 }
 
@@ -27,7 +30,7 @@ test("dashboard login sets a persistent HttpOnly cookie and reuses it", async ()
   });
 
   assert.equal(login.status, 303);
-  assert.equal(login.headers.get("location"), "/dashboard/");
+  assert.equal(login.headers.get("location"), "/dashboard");
   const setCookie = login.headers.get("set-cookie");
   assert.ok(setCookie);
   assert.match(setCookie, /dashboard_session=/);
@@ -36,7 +39,7 @@ test("dashboard login sets a persistent HttpOnly cookie and reuses it", async ()
   assert.match(setCookie, /Max-Age=2592000/i);
 
   const cookie = setCookie.split(";", 1)[0];
-  const dashboard = await app.request("http://localhost/dashboard/", {
+  const dashboard = await app.request(login.headers.get("location")!, {
     headers: { cookie },
   });
   assert.equal(dashboard.status, 200);

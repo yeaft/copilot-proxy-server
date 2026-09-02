@@ -79,7 +79,7 @@ export function createDashboardAuth(username: string, password: string) {
         secure: forwardedProto === "https" || new URL(c.req.url).protocol === "https:",
         maxAge: SESSION_TTL_SECONDS,
       });
-      return c.redirect("/dashboard/", 303);
+      return c.redirect("/dashboard", 303);
     },
     middleware: async (c: Context, next: Next) => {
       if (isValidSession(getCookie(c, COOKIE_NAME), username, password)) {
