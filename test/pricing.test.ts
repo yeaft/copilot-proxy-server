@@ -14,3 +14,15 @@ test("charges cached input at the cache-read rate", () => {
   assert.equal(cost.credits, 0.312);
   assert.equal(cost.usd, 0.00312);
 });
+
+test("prices GPT-6 Astra usage", () => {
+  const cost = calculateUsageCost("gpt-6-astra", {
+    prompt_tokens: 2_000_000,
+    cached_prompt_tokens: 1_000_000,
+    completion_tokens: 1_000_000,
+  });
+
+  assert.equal(cost.priced, true);
+  assert.equal(cost.credits, 6_100);
+  assert.equal(cost.usd, 61);
+});

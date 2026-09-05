@@ -12,6 +12,7 @@ interface CreditRates {
 
 // Credits per 1M tokens. One credit is $0.01.
 const GPT_RATES: Array<[RegExp, CreditRates]> = [
+  [/gpt[-_. ]?6[-_. ]?astra/i, { input: 1000, output: 5000, cacheRead: 100 }],
   [/gpt[-_. ]?5\.4[-_. ]?mini/i, { input: 75, output: 450, cacheRead: 7.5 }],
   [/gpt[-_. ]?5\.5/i, { input: 500, output: 3000, cacheRead: 50 }],
   [/gpt[-_. ]?5\.6[-_. ]?luna/i, { input: 20, output: 120, cacheRead: 2 }],
