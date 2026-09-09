@@ -9,7 +9,11 @@ import { logUsage } from "../../lib/db.js";
 import { getClientIp } from "../../lib/ip.js";
 import { hasResponsesOutput } from "../../lib/latency.js";
 import { createResponses } from "../../services/copilot-completions.js";
-import type { ResponsesPayload, ResponsesResult } from "../../types/responses.js";
+import type {
+  ResponsesPayload,
+  ResponsesResult,
+  ResponseStreamEvent,
+} from "../../types/responses.js";
 import {
   createDeepseekCompletion,
   isDeepseekModel,
@@ -58,6 +62,7 @@ export async function handleResponses(c: Context) {
       completion_tokens: response.usage?.output_tokens ?? 0,
       total_tokens: response.usage?.total_tokens ?? 0,
       cached_prompt_tokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
+      cache_write_prompt_tokens: response.usage?.input_tokens_details?.cache_write_tokens ?? 0,
       stream: false,
       duration_ms: Date.now() - startTime,
       ttfb_ms: 0,
@@ -97,6 +102,7 @@ export async function handleResponses(c: Context) {
       completion_tokens: lastUsage?.output_tokens ?? 0,
       total_tokens: lastUsage?.total_tokens ?? 0,
       cached_prompt_tokens: lastUsage?.input_tokens_details?.cached_tokens ?? 0,
+      cache_write_prompt_tokens: lastUsage?.input_tokens_details?.cache_write_tokens ?? 0,
       stream: true,
       duration_ms: Date.now() - startTime,
       ttfb_ms: ttfb,

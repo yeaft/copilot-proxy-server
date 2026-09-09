@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createResponses,
   responsesStreamToChatStream,
   responsesToChatResponse,
 } from "../src/services/copilot-completions.js";
-import type { ResponsesResult } from "../src/types/responses.js";
+import { state } from "../src/lib/state.js";
+import type { ResponsesPayload, ResponsesResult } from "../src/types/responses.js";
 
 const response: ResponsesResult = {
   id: "resp_1",
@@ -18,9 +20,41 @@ const response: ResponsesResult = {
     input_tokens: 1_000,
     output_tokens: 100,
     total_tokens: 1_100,
-    input_tokens_details: { cached_tokens: 800 },
+    input_tokens_details: { cached_tokens: 800, cache_write_tokens: 120 },
   },
 };
+
+test("Responses requests preserve cache keys, reasoning continuity, and function items", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalToken = state.copilotToken;
+  let forwarded: ResponsesPayload | undefined;
+  state.copilotToken = "test-token";
+  globalThis.fetch = async (_input, init) => {
+    forwarded = JSON.parse(String(init?.body)) as ResponsesPayload;
+    return new Response(JSON.stringify(response), {
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const payload: ResponsesPayload = {
+      model: response.model,
+      prompt_cache_key: "session-1",
+      include: ["reasoning.encrypted_content"],
+      reasoning: { effort: "high", summary: "auto" },
+      input: [
+        { type: "reasoning", encrypted_content: "opaque" },
+        { type: "function_call", call_id: "call-1", name: "read", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-1", output: "ok" },
+      ],
+    };
+    await createResponses(payload);
+    assert.deepEqual(forwarded, payload);
+  } finally {
+    globalThis.fetch = originalFetch;
+    state.copilotToken = originalToken;
+  }
+});
 
 test("Responses non-stream conversion preserves cached input tokens", () => {
   const converted = responsesToChatResponse(response, response.model);

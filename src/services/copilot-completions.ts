@@ -301,7 +301,8 @@ export function responsesToChatResponse(
 ): ChatCompletionResponse {
   // Extract text from output
   const text = result.output
-    ?.flatMap((item) => item.content)
+    ?.filter((item) => item.type === "message")
+    .flatMap((item) => item.content)
     .filter((c) => c.type === "output_text")
     .map((c) => c.text)
     .join("") ?? "";
@@ -328,7 +329,7 @@ export function responsesToChatResponse(
           completion_tokens: result.usage.output_tokens,
           total_tokens: result.usage.total_tokens,
           prompt_tokens_details: result.usage.input_tokens_details
-            ? { cached_tokens: result.usage.input_tokens_details.cached_tokens }
+            ? { cached_tokens: result.usage.input_tokens_details.cached_tokens ?? 0 }
             : undefined,
         }
       : undefined,
@@ -394,7 +395,7 @@ export async function* responsesStreamToChatStream(
               prompt_tokens_details: parsed.response.usage.input_tokens_details
                 ? {
                     cached_tokens:
-                      parsed.response.usage.input_tokens_details.cached_tokens,
+                      parsed.response.usage.input_tokens_details.cached_tokens ?? 0,
                   }
                 : undefined,
             }
