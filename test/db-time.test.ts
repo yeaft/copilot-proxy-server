@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   getDb,
   getStatsOverview,
+  logUsage,
   getTimeSeries,
   getTopIps,
   getTopModels,
@@ -60,6 +61,44 @@ test("queries same-day UTC ranges and groups chart buckets in browser local time
 
     assert.equal(getStatsOverview(range).total_requests, 1);
     assert.deepEqual(getTimeSeries(range).map((point) => point.time_bucket), ["2026-09-02 16:00"]);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("persists and aggregates cache writes separately from cache reads", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "copilot-proxy-db-test-"));
+  try {
+    await initDatabase(dataDir);
+    logUsage({
+      ip: "client-cache",
+      model: "gpt-5.6-sol",
+      endpoint: "responses",
+      prompt_tokens: 1_000,
+      completion_tokens: 100,
+      total_tokens: 1_100,
+      cached_prompt_tokens: 800,
+      cache_write_prompt_tokens: 120,
+      stream: false,
+      duration_ms: 200,
+      ttfb_ms: 0,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const range = {
+      start: "2000-01-01T00:00:00Z",
+      end: "2100-01-01T00:00:00Z",
+    };
+    const overview = getStatsOverview(range);
+    assert.equal(overview.total_cached_prompt_tokens, 800);
+    assert.equal(overview.total_cache_write_prompt_tokens, 120);
+    assert.equal(getTimeSeries(range)[0]?.cache_write_prompt_tokens, 120);
+    assert.equal(getTopModels(range)[0]?.cache_write_prompt_tokens, 120);
+    assert.equal(getTopIps(range)[0]?.cache_write_prompt_tokens, 120);
+    // Cache writes remain part of regular input pricing; only cache reads receive
+    // the discounted rate.
+    assert.equal(overview.total_credits, 0.156);
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

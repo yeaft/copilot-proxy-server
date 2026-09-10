@@ -86,6 +86,7 @@ export function getDashboardHtml(): string {
       <div class="card"><div class="card-label">Total Requests</div><div class="card-value" id="stat-requests">-</div></div>
       <div class="card"><div class="card-label">Uncached Input</div><div class="card-value" id="stat-input-tokens">-</div></div>
       <div class="card"><div class="card-label">Cache Read</div><div class="card-value" id="stat-cached-tokens">-</div></div>
+      <div class="card"><div class="card-label">Cache Write</div><div class="card-value" id="stat-cache-write-tokens">-</div></div>
       <div class="card"><div class="card-label">Output Tokens</div><div class="card-value" id="stat-output-tokens">-</div></div>
       <div class="card"><div class="card-label">Total Tokens</div><div class="card-value" id="stat-tokens">-</div></div>
       <div class="card"><div class="card-label">Estimated Cost</div><div class="card-value" id="stat-cost">-</div><div class="card-sub" id="stat-credits"></div></div>
@@ -140,14 +141,14 @@ export function getDashboardHtml(): string {
       <div class="table-box">
         <h3>Model Consumption</h3>
         <table>
-          <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Cache Read</th><th class="num">Output</th><th class="num">Credits</th><th class="num">Cost</th></tr></thead>
+          <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Cache Read</th><th class="num">Cache Write</th><th class="num">Output</th><th class="num">Credits</th><th class="num">Cost</th></tr></thead>
           <tbody id="table-models"></tbody>
         </table>
       </div>
       <div class="table-box">
         <h3>IP Consumption</h3>
         <table>
-          <thead><tr><th>IP</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Cache Read</th><th class="num">Output</th><th class="num">Credits</th><th class="num">Cost</th></tr></thead>
+          <thead><tr><th>IP</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Cache Read</th><th class="num">Cache Write</th><th class="num">Output</th><th class="num">Credits</th><th class="num">Cost</th></tr></thead>
           <tbody id="table-ips"></tbody>
         </table>
       </div>
@@ -248,6 +249,7 @@ export function getDashboardHtml(): string {
     document.getElementById('stat-requests').textContent = fmt(s.total_requests);
     document.getElementById('stat-input-tokens').textContent = fmt(Math.max(0, s.total_prompt_tokens - s.total_cached_prompt_tokens));
     document.getElementById('stat-cached-tokens').textContent = fmt(s.total_cached_prompt_tokens);
+    document.getElementById('stat-cache-write-tokens').textContent = fmt(s.total_cache_write_prompt_tokens);
     document.getElementById('stat-output-tokens').textContent = fmt(s.total_completion_tokens);
     document.getElementById('stat-tokens').textContent = fmt(s.total_tokens);
     document.getElementById('stat-cost').textContent = '$' + Number(s.total_cost_usd).toFixed(2);
@@ -299,7 +301,7 @@ export function getDashboardHtml(): string {
     if (!timelineChart) timelineChart = echarts.init(document.getElementById('chart-timeline'));
     timelineChart.setOption({
       tooltip: { trigger: 'axis' },
-      legend: { data: ['Uncached Input', 'Cache Read', 'Output'], textStyle: { color: '#94a3b8' }, top: 0 },
+      legend: { data: ['Uncached Input', 'Cache Read', 'Cache Write', 'Output'], textStyle: { color: '#94a3b8' }, top: 0 },
       grid: { left: 60, right: 20, top: 40, bottom: 54 },
       xAxis: { type: 'category', data: data.map(d => d.time_bucket), axisLabel: { color: '#64748b', fontSize: 11 }, axisLine: { lineStyle: { color: '#334155' } } },
       yAxis: { type: 'value', axisLabel: { color: '#64748b', formatter: function(v) { return v >= 1000 ? (v/1000).toFixed(0) + 'K' : v; } }, splitLine: { lineStyle: { color: '#1e293b' } } },
@@ -307,6 +309,7 @@ export function getDashboardHtml(): string {
       series: [
         { name: 'Uncached Input', type: 'line', data: data.map(d => Math.max(0, d.prompt_tokens - d.cached_prompt_tokens)), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#3b82f6' } },
         { name: 'Cache Read', type: 'line', data: data.map(d => d.cached_prompt_tokens), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#f59e0b' } },
+        { name: 'Cache Write', type: 'line', data: data.map(d => d.cache_write_prompt_tokens), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#8b5cf6' } },
         { name: 'Output', type: 'line', data: data.map(d => d.completion_tokens), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#10b981' } }
       ]
     }, true);
@@ -334,14 +337,14 @@ export function getDashboardHtml(): string {
   }
 
   function consumptionRow(d) {
-    return '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(Math.max(0, d.prompt_tokens - d.cached_prompt_tokens)) + '</td><td class="num">' + fmt(d.cached_prompt_tokens) + '</td><td class="num">' + fmt(d.completion_tokens) + '</td><td class="num">' + (d.credits == null ? 'N/A' : Number(d.credits).toFixed(2)) + '</td><td class="num">' + (d.cost_usd == null ? 'N/A' : '$' + Number(d.cost_usd).toFixed(2)) + '</td></tr>';
+    return '<tr><td>' + d.name + '</td><td class="num">' + fmt(d.requests) + '</td><td class="num">' + fmt(Math.max(0, d.prompt_tokens - d.cached_prompt_tokens)) + '</td><td class="num">' + fmt(d.cached_prompt_tokens) + '</td><td class="num">' + fmt(d.cache_write_prompt_tokens) + '</td><td class="num">' + fmt(d.completion_tokens) + '</td><td class="num">' + (d.credits == null ? 'N/A' : Number(d.credits).toFixed(2)) + '</td><td class="num">' + (d.cost_usd == null ? 'N/A' : '$' + Number(d.cost_usd).toFixed(2)) + '</td></tr>';
   }
 
   async function loadTopIps() {
     const data = await fetchJSON('/dashboard/api/top-ips?' + buildQuery());
     const tbody = document.getElementById('table-ips');
     tbody.innerHTML = data.map(consumptionRow).join('');
-    if (!data.length) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
+    if (!data.length) tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
   }
 
   async function loadTopModels() {
@@ -354,7 +357,7 @@ export function getDashboardHtml(): string {
 
     const consumptionBody = document.getElementById('table-models');
     consumptionBody.innerHTML = data.map(consumptionRow).join('');
-    if (!data.length) consumptionBody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
+    if (!data.length) consumptionBody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#64748b;padding:20px;">No data</td></tr>';
   }
 
   async function loadAll() {
