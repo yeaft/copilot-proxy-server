@@ -97,7 +97,7 @@ test("persists and aggregates cache writes separately from cache reads", async (
     assert.equal(getTopIps(range)[0]?.cache_write_prompt_tokens, 120);
     // Cache writes remain part of regular input pricing; only cache reads receive
     // the discounted rate.
-    assert.equal(overview.total_credits, 0.156);
+    assert.equal(overview.total_credits, 0.312);
     await new Promise((resolve) => setTimeout(resolve, 1_050));
   } finally {
     await rm(dataDir, { recursive: true, force: true });
@@ -143,8 +143,8 @@ test("reports per-model latency percentiles and prices IP usage per model", asyn
     const ip = getTopIps(range)[0];
     assert.equal(ip.name, "client-a");
     assert.equal(ip.prompt_tokens, 2_000_000);
-    assert.equal(ip.credits, 600);
-    assert.equal(ip.cost_usd, 6);
+    assert.equal(ip.credits, 1_200);
+    assert.equal(ip.cost_usd, 12);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
