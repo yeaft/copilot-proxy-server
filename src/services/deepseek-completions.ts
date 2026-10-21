@@ -1,8 +1,16 @@
+import * as zlib from "node:zlib";
+
 import { logger } from "../lib/logger.js";
 import { state } from "../lib/state.js";
 
 const DEEPSEEK_DEFAULT_HOST = "https://api.deepseek.com";
 const ANTHROPIC_VERSION = "2023-06-01";
+const FETCH_DECODED_ENCODINGS = new Set(["br", "gzip", "x-gzip", "deflate"]);
+// Node 24's bundled Undici 7 also decodes zstd; Node 22's Undici 6 does not,
+// even when the runtime exposes the zlib zstd APIs.
+if (Number(process.versions.undici?.split(".")[0]) >= 7 && typeof zlib.createZstdDecompress === "function") {
+  FETCH_DECODED_ENCODINGS.add("zstd");
+}
 
 export type DeepseekEndpoint =
   | "/v1/messages"
@@ -55,5 +63,33 @@ export async function createDeepseekCompletion(
     logger.error("DeepSeek API error:", response.status);
   }
 
-  return response;
+  // Node fetch decodes supported compression but keeps the original headers.
+  // Only remove the encoding when the entire chain was decoded; Node 22 leaves
+  // bodies with any unknown coding untouched. The downstream owns HTTP framing.
+  const responseHeaders = new Headers(response.headers);
+  const contentEncodings = responseHeaders.get("content-encoding")?.toLowerCase().split(",");
+  if (contentEncodings?.every((coding) => FETCH_DECODED_ENCODINGS.has(coding.trim()))) {
+    responseHeaders.delete("content-encoding");
+  }
+  const connectionHeaders = responseHeaders.get("connection")?.split(",") ?? [];
+  for (const header of [
+    ...connectionHeaders.map((header) => header.trim()),
+    "content-length",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+  ]) {
+    if (header) responseHeaders.delete(header);
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders,
+  });
 }
