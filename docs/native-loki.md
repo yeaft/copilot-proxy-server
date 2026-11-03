@@ -56,7 +56,10 @@ their matching native upstream endpoints. Unknown request fields are retained an
 SSE response bytes are not translated/re-encoded. Request JSON is reserialized to
 remove the `loki/` routing prefix; original request whitespace is not preserved.
 Loki JSON bodies are limited to 32 MiB (UTF-8 bytes including whitespace); existing
-Copilot/DeepSeek body limits are unchanged.
+Copilot/DeepSeek body limits are unchanged. Shared endpoints must read and parse JSON
+to select the provider, so this is a post-read validation limit, not a streaming
+memory cap. For untrusted or public deployments, also enforce request size/time
+limits at a reverse proxy; the client API key is required before body processing.
 Per-model protocol availability is determined by the upstream. Gemini conversion and
 WebSocket Responses are **not supported** for Loki models.
 
