@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import type { PublicClientApplication, AuthenticationResult } from "@azure/msal-node";
-import { isolatedBrokerToken } from "../src/auth/loki-broker.js";
+import { brokerChildProgram, isolatedBrokerToken } from "../src/auth/loki-broker.js";
 import { LokiAuthentication, LokiAuthError, LokiSignInRequired } from "../src/auth/loki-auth.js";
 
 // Read installed dependency code without importing the platform-native addon or
@@ -125,14 +125,18 @@ test("isolated broker timeout kills child before settling; no cache is shared, a
         }) } as unknown as PublicClientApplication;
       }
       protected override async acquireBrokerToken(account: Parameters<typeof isolatedBrokerToken>[0]) {
-        const program = hang
-          ? `process.once('message', (message) => {
-              if ('directory' in message || 'cache' in message) process.exit(1);
-              setInterval(() => {}, 1000);
-              setTimeout(() => process.send({value: 'late-private-token', expiresAt: 0}), 2000);
-            });`
-          : `process.once('message', () => process.send({value: 'offline-isolated', expiresAt: Date.now() + 3600000}));`;
-        return isolatedBrokerToken(account, settings, hang ? 300 : 3000, childProgram(program, children));
+        const program = brokerChildProgram(settings, {
+          msal: import.meta.resolve('@azure/msal-node'),
+          extensions: fakeNativeModule(`export class NativeBrokerPlugin {
+            isBrokerAvailable = true; setLogger() {}
+            async acquireTokenSilent() {
+              ${hang ? `await new Promise(resolve => setTimeout(resolve, 5000));` : ''}
+              return { fromPlatformBroker: true, accessToken: '${hang ? 'late-private-token' : 'offline-isolated'}',
+                expiresOn: new Date(Date.now() + 3600000) };
+            }
+          }`),
+        });
+        return isolatedBrokerToken(account, settings, hang ? 1000 : 5000, childProgram(program, children));
       }
     }
     const auth = new IsolatedAuthentication(directory);
@@ -146,6 +150,7 @@ test("isolated broker timeout kills child before settling; no cache is shared, a
       if (response.status === "rejected") assert.match(response.reason.message, /broker timed out/);
     }
     assert.ok(children[0].signalCode || children[0].exitCode !== null, "timeout does not settle before child exit");
+    assert.equal(children[0].connected, false);
     assert.equal(await readFile(path, "utf8"), before);
     assert.deepEqual(await readdir(join(directory, "auth")), ["cache.json"]);
     assert.equal((await auth.account())?.nativeAccountId, "native");
@@ -153,6 +158,7 @@ test("isolated broker timeout kills child before settling; no cache is shared, a
     assert.equal(await auth.getToken(), "offline-isolated", "lock and pending released; fresh child, not poisoned client");
     assert.equal(children.length, 2);
     assert.ok(children[1].signalCode || children[1].exitCode !== null);
+    assert.equal(children[1].connected, false);
     assert.equal(await readFile(path, "utf8"), before);
   } finally {
     for (const child of children) child.kill("SIGKILL");
@@ -179,4 +185,125 @@ test("isolated broker errors/malformed replies drop native diagnostics and cause
       assert.ok(child.signalCode || child.exitCode !== null);
     }
   } finally { for (const child of children) child.kill("SIGKILL"); }
+});
+
+function fakeNativeModule(body: string): string {
+  return `data:text/javascript;base64,${Buffer.from(body).toString("base64")}`;
+}
+
+test("exact eval program uses real MSAL with fake native plugin after restart, sends identifiers only and never writes cache", { timeout: 10000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "proxy-loki-child-restart-"));
+  const children: ChildProcess[] = [];
+  try {
+    const granted = {
+      fromPlatformBroker: true, accessToken: "offline-initial", expiresOn: new Date(0),
+      account: { homeAccountId: "user.tenant", localAccountId: "user", nativeAccountId: "native", tenantId: "tenant",
+        username: "private-user@example.invalid", environment: "login.microsoftonline.com" },
+    } as AuthenticationResult;
+    const program = brokerChildProgram(settings, {
+      msal: import.meta.resolve("@azure/msal-node"),
+      extensions: fakeNativeModule(`
+        import assert from 'node:assert/strict';
+        export class NativeBrokerPlugin {
+          isBrokerAvailable = true;
+          setLogger() {}
+          async acquireTokenSilent(request) {
+            assert.deepEqual(Object.keys(request.account).sort(), ['homeAccountId', 'nativeAccountId']);
+            assert.equal(request.account.homeAccountId, 'user.tenant');
+            assert.equal(request.accountId, 'native');
+            assert.equal(request.forceRefresh, false);
+            assert.equal(request.clientId, 'offline-client');
+            assert.equal(request.authority, 'https://login.microsoftonline.com/organizations');
+            assert.deepEqual(request.scopes, ['offline']);
+            // Neither diagnostics nor unused result fields may escape to parent.
+            console.log('private-native-output');
+            console.error('private-native-error');
+            return { fromPlatformBroker: true, accessToken: 'offline-child-token',
+              idToken: 'private-id-token', account: { username: 'private-user' },
+              expiresOn: new Date(4102444800000) };
+          }
+        }
+      `),
+    });
+    assert.doesNotMatch(program, /private-user@example|user\.tenant|offline-initial/);
+    class RestartAuthentication extends LokiAuthentication {
+      protected override async brokerClient(): Promise<PublicClientApplication> {
+        return { acquireTokenInteractive: async () => granted } as unknown as PublicClientApplication;
+      }
+      protected override async acquireBrokerToken(account: Parameters<typeof isolatedBrokerToken>[0]) {
+        return isolatedBrokerToken(account, settings, 3000, childProgram(program, children));
+      }
+    }
+    await new RestartAuthentication(directory).signIn(false, () => {});
+    const path = join(directory, 'auth', 'cache.json');
+    const before = await readFile(path, 'utf8');
+    const restarted = new RestartAuthentication(directory);
+    assert.equal(await restarted.getToken(), 'offline-child-token');
+    assert.equal(await readFile(path, 'utf8'), before);
+    assert.equal(children.length, 1);
+    assert.equal(children[0].connected, false, 'IPC is closed before the cache lock is released');
+    assert.ok(children[0].signalCode || children[0].exitCode !== null);
+    assert.deepEqual(await readdir(join(directory, 'auth')), ['cache.json']);
+  } finally {
+    for (const child of children) child.kill('SIGKILL');
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("exact eval program redacts native exceptions, rejects non-broker tokens and unavailable plugins", { timeout: 15000 }, async () => {
+  const children: ChildProcess[] = [];
+  try {
+    for (const [available, response] of [
+      [true, `throw new Error('private-native-secret private-user@example.invalid')`],
+      [true, `return { accessToken: 'private-unbound-token', fromPlatformBroker: false }`],
+      [false, `throw new Error('must never be called')`],
+    ] as const) {
+      const program = brokerChildProgram(settings, {
+        msal: import.meta.resolve('@azure/msal-node'),
+        extensions: fakeNativeModule(`export class NativeBrokerPlugin {
+          isBrokerAvailable = ${available}; setLogger() {}
+          async acquireTokenSilent() { ${response} }
+        }`),
+      });
+      await assert.rejects(isolatedBrokerToken({ homeAccountId: 'offline', nativeAccountId: 'native' }, settings,
+        3000, childProgram(program, children)), (error: Error) => {
+        assert.ok(error instanceof LokiAuthError);
+        assert.doesNotMatch(error.message, /private-|example.invalid/);
+        assert.equal(error.cause, undefined);
+        return true;
+      });
+      assert.equal(children.at(-1)!.connected, false);
+      assert.ok(children.at(-1)!.signalCode || children.at(-1)!.exitCode !== null);
+    }
+  } finally { for (const child of children) child.kill('SIGKILL'); }
+});
+
+test("child launch errors settle safely without retaining IPC or native diagnostics", { timeout: 5000 }, async () => {
+  let child: ChildProcess | undefined;
+  const launch = () => child = spawn('nonexistent-offline-broker-executable', [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+  await assert.rejects(isolatedBrokerToken({ homeAccountId: 'offline', nativeAccountId: 'native' }, settings, 1000, launch),
+    (error: Error) => error instanceof LokiAuthError && !/nonexistent|offline-broker/.test(error.message));
+  assert.equal(child!.connected, false);
+});
+
+test("parent sends only home/native IDs over IPC, never account metadata, settings or cache state", { timeout: 5000 }, async () => {
+  const children: ChildProcess[] = [];
+  try {
+    const launch = childProgram(`
+      import assert from 'node:assert/strict';
+      process.once('message', message => {
+        assert.deepEqual(message, { homeAccountId: 'offline-home', nativeAccountId: 'offline-native' });
+        process.send({ value: 'offline-token', expiresAt: 4102444800000 });
+      });
+    `, children);
+    const account = {
+      homeAccountId: 'offline-home', nativeAccountId: 'offline-native', username: 'private-user@example.invalid',
+      localAccountId: 'private-local', tenantId: 'private-tenant', environment: 'login.microsoftonline.com',
+      idToken: 'private-id-token', idTokenClaims: { secret: 'private-claims' },
+    };
+    assert.deepEqual(await isolatedBrokerToken(account, settings, 3000, launch),
+      { value: 'offline-token', expiresAt: 4102444800000 });
+    assert.equal(children[0].connected, false);
+    assert.ok(children[0].signalCode || children[0].exitCode !== null);
+  } finally { for (const child of children) child.kill('SIGKILL'); }
 });
