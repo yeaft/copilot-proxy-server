@@ -14,6 +14,8 @@ export interface UsageRecord {
   total_tokens: number;
   cached_prompt_tokens?: number;
   cache_write_prompt_tokens?: number;
+  /** Missing on legacy callers means known; native responses without usage set false. */
+  usage_known?: boolean;
   stream: boolean;
   duration_ms: number;
   ttfb_ms: number; // Time to first output token (legacy column name; 0 when unavailable)
@@ -65,6 +67,7 @@ export async function initDatabase(dataDir: string): Promise<void> {
       total_tokens INTEGER NOT NULL DEFAULT 0,
       cached_prompt_tokens INTEGER NOT NULL DEFAULT 0,
       cache_write_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+      usage_known INTEGER NOT NULL DEFAULT 1,
       stream INTEGER NOT NULL DEFAULT 0,
       duration_ms INTEGER NOT NULL DEFAULT 0,
       ttfb_ms INTEGER NOT NULL DEFAULT 0
@@ -77,6 +80,7 @@ export async function initDatabase(dataDir: string): Promise<void> {
 
   // Additive migrations keep existing usage databases compatible.
   for (const column of [
+    "usage_known INTEGER NOT NULL DEFAULT 1",
     "ttfb_ms INTEGER NOT NULL DEFAULT 0",
     "cached_prompt_tokens INTEGER NOT NULL DEFAULT 0",
     "cache_write_prompt_tokens INTEGER NOT NULL DEFAULT 0",
@@ -107,8 +111,8 @@ export function logUsage(record: UsageRecord): void {
       db!.run(
         `INSERT INTO usage_logs (
           ip, model, endpoint, prompt_tokens, completion_tokens, total_tokens,
-          cached_prompt_tokens, cache_write_prompt_tokens, stream, duration_ms, ttfb_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          cached_prompt_tokens, cache_write_prompt_tokens, stream, duration_ms, ttfb_ms, usage_known
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           record.ip,
           record.model,
@@ -121,6 +125,7 @@ export function logUsage(record: UsageRecord): void {
           record.stream ? 1 : 0,
           record.duration_ms,
           record.ttfb_ms,
+          record.usage_known === false ? 0 : 1,
         ]
       );
       scheduleSave();
@@ -242,6 +247,7 @@ function queryOne<T>(sql: string, params: unknown[] = []): T {
 
 export interface StatsOverview {
   total_requests: number;
+  unknown_usage_requests: number;
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_cached_prompt_tokens: number;
@@ -266,6 +272,7 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
 
   const base = queryOne<{
     total_requests: number;
+    unknown_usage_requests: number;
     total_prompt_tokens: number;
     total_completion_tokens: number;
     total_cached_prompt_tokens: number;
@@ -277,6 +284,7 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
   }>(
     `SELECT
       COUNT(*) as total_requests,
+      COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
       COALESCE(SUM(prompt_tokens), 0) as total_prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as total_completion_tokens,
       COALESCE(SUM(cached_prompt_tokens), 0) as total_cached_prompt_tokens,
@@ -345,6 +353,7 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
 export interface TimeSeriesPoint {
   time_bucket: string;
   requests: number;
+  unknown_usage_requests: number;
   prompt_tokens: number;
   completion_tokens: number;
   cached_prompt_tokens: number;
@@ -367,6 +376,7 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
       `SELECT
         strftime('%Y-%m-%d %H:', timestamp, ?) || printf('%02d', (CAST(strftime('%M', timestamp, ?) AS INTEGER) / 5) * 5) as time_bucket,
         COUNT(*) as requests,
+        COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
         COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
         COALESCE(SUM(completion_tokens), 0) as completion_tokens,
         COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
@@ -386,6 +396,7 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
     `SELECT
       strftime('${strftime}', timestamp, ?) as time_bucket,
       COUNT(*) as requests,
+      COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
       COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
@@ -404,6 +415,7 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
 export interface TopEntry {
   name: string;
   requests: number;
+  unknown_usage_requests: number;
   prompt_tokens: number;
   completion_tokens: number;
   cached_prompt_tokens: number;
@@ -431,6 +443,7 @@ export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
       ip as name,
       model,
       COUNT(*) as requests,
+      COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
       COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
@@ -449,6 +462,7 @@ export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
     const entry = byIp.get(row.name) ?? {
       name: row.name,
       requests: 0,
+      unknown_usage_requests: 0,
       prompt_tokens: 0,
       completion_tokens: 0,
       cached_prompt_tokens: 0,
@@ -461,6 +475,7 @@ export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
     };
     const cost = calculateUsageCost(row.model, row);
     entry.requests += row.requests;
+    entry.unknown_usage_requests += row.unknown_usage_requests;
     entry.prompt_tokens += row.prompt_tokens;
     entry.completion_tokens += row.completion_tokens;
     entry.cached_prompt_tokens += row.cached_prompt_tokens;
@@ -486,6 +501,7 @@ export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
     `SELECT
       model as name,
       COUNT(*) as requests,
+      COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
       COUNT(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN 1 END) as ttfb_samples,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,

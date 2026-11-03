@@ -41,6 +41,8 @@ export interface UsageCost {
 }
 
 export function calculateUsageCost(model: string, usage: TokenUsage): UsageCost {
+  // Native Loki model IDs are not billed at Copilot's rates, even if the name matches.
+  if (/^loki\//i.test(model)) return { priced: false, credits: 0, usd: 0 };
   const rates = MODEL_RATES.find(([pattern]) => pattern.test(model))?.[1];
   if (!rates) return { priced: false, credits: 0, usd: 0 };
 

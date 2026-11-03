@@ -83,3 +83,11 @@ test("unknown models stay unpriced", () => {
     prompt_tokens: 1_000_000, completion_tokens: 1_000_000, cached_prompt_tokens: 0,
   }), { priced: false, credits: 0, usd: 0 });
 });
+
+test("native Loki IDs never use Copilot pricing even when the underlying model matches", () => {
+  for (const model of ["loki/gpt-5.4", "LOKI/gpt-6-astra", "Loki/vendor/gemini-3.8-flash"]) {
+    assert.deepEqual(calculateUsageCost(model, {
+      prompt_tokens: 1_000_000, completion_tokens: 1_000_000, cached_prompt_tokens: 500_000,
+    }), { priced: false, credits: 0, usd: 0 });
+  }
+});

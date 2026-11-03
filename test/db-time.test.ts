@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import initSqlJs from "sql.js/dist/sql-asm.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -145,6 +146,70 @@ test("reports per-model latency percentiles and prices IP usage per model", asyn
     assert.equal(ip.prompt_tokens, 2_000_000);
     assert.equal(ip.credits, 1_200);
     assert.equal(ip.cost_usd, 12);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("additive usage-known migration preserves legacy rows and exposes unknown counts", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "copilot-proxy-db-migration-test-"));
+  try {
+    const SQL = await initSqlJs();
+    const legacy = new SQL.Database();
+    legacy.run(
+      `CREATE TABLE usage_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+        ip TEXT NOT NULL, model TEXT NOT NULL, endpoint TEXT NOT NULL,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        stream INTEGER NOT NULL DEFAULT 0,
+        duration_ms INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO usage_logs (ip, model, endpoint, prompt_tokens, completion_tokens, total_tokens)
+      VALUES ('legacy-client', 'gpt-5.4', 'openai', 10, 2, 12);`
+    );
+    await writeFile(join(dataDir, "usage.db"), Buffer.from(legacy.export()));
+    legacy.close();
+    await initDatabase(dataDir);
+    // Reinitializing is idempotent and preserves the migrated data/defaults.
+    await initDatabase(dataDir);
+    assert.deepEqual(getDb().exec("SELECT usage_known, total_tokens FROM usage_logs")[0].values, [[1, 12]]);
+    const column = getDb().exec("PRAGMA table_info(usage_logs)")[0].values
+      .find((row) => row[1] === "usage_known");
+    assert.ok(column);
+    assert.equal(column[3], 1); // NOT NULL
+    assert.equal(String(column[4]), "1");
+
+    const base = {
+      ip: "native-client", model: "loki/gpt-5.4", endpoint: "openai",
+      prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+      stream: true, duration_ms: 20, ttfb_ms: 0,
+    };
+    logUsage({ ...base, usage_known: false });
+    logUsage({ ...base }); // Existing callers without the flag remain known.
+    logUsage({ ...base, usage_known: true }); // Real zero usage is distinct from unknown.
+    logUsage({ ...base, usage_known: false, model: "loki/anthropic", prompt_tokens: 5, total_tokens: 5 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(getDb().exec("SELECT usage_known FROM usage_logs ORDER BY id")[0].values, [[1], [0], [1], [1], [0]]);
+    const range = { start: "2000-01-01T00:00:00Z", end: "2100-01-01T00:00:00Z" };
+    const overview = getStatsOverview(range);
+    assert.equal(overview.total_requests, 5);
+    assert.equal(overview.unknown_usage_requests, 2);
+    assert.equal(overview.total_tokens, 17);
+    assert.equal(overview.unpriced_tokens, 5);
+    assert.equal(getTopModels(range).find((row) => row.name === "loki/gpt-5.4")?.unknown_usage_requests, 1);
+    assert.equal(getTopModels(range).find((row) => row.name === "gpt-5.4")?.unknown_usage_requests, 0);
+    const ip = getTopIps(range).find((row) => row.name === "native-client");
+    assert.equal(ip?.requests, 4);
+    assert.equal(ip?.unknown_usage_requests, 2);
+    assert.equal(ip?.credits, null);
+    for (const granularity of ["1m", "5m", "1h", "1d"]) {
+      assert.equal(getTimeSeries({ ...range, granularity })[0]?.unknown_usage_requests, 2);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    getDb().close();
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
