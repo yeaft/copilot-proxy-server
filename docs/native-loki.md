@@ -54,8 +54,11 @@ Per-model protocol availability is determined by the upstream. Gemini conversion
 WebSocket Responses are **not supported** for Loki models.
 
 Client `API_KEY` credentials/cookies/forwarding headers are not sent upstream; Microsoft
-tokens are used only for the trusted Office endpoint. A 401 triggers one forced refresh
-and one retry. Client disconnect cancels upstream work; the five-minute timeout is an
+tokens are used only for the trusted Office endpoint. A 401 triggers at most one renewal
+attempt and one retry. Browser/device-code credentials support silent forced refresh.
+The current Windows broker SDK does not implement forced renewal; a rejected broker
+token requires `npm run auth:loki` again rather than silently reusing the rejected token.
+Client disconnect cancels upstream work; the five-minute timeout is an
 **idle** timeout rather than a total stream duration limit.
 
 Usage is observed without rewriting the response. Missing/incomplete usage is marked

@@ -184,3 +184,23 @@ test("Loki keeps the proxy rate limit response", async () => {
     assert.equal((await post("/v1/responses", { model: `loki/${nativeModel}` })).status, 429);
   } finally { state.rateLimitSeconds = seconds; state.lastRequestTimestamp = last; }
 });
+
+test("non-Loki DeepSeek requests still reach the existing provider in Loki-only mode", async () => {
+  const key = state.deepseekApiKey;
+  const host = process.env.DEEPSEEK_HOST;
+  const count = requests.length;
+  state.deepseekApiKey = "deepseek-only-test-key";
+  process.env.DEEPSEEK_HOST = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+  try {
+    const response = await post("/v1/chat/completions", { model: "deepseek-v4-pro", messages: [] });
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.equal(requests.length, count + 1);
+    assert.equal(requests.at(-1)!.headers.authorization, "Bearer deepseek-only-test-key");
+    assert.equal(requests.at(-1)!.payload.model, "deepseek-v4-pro");
+  } finally {
+    state.deepseekApiKey = key;
+    if (host === undefined) delete process.env.DEEPSEEK_HOST;
+    else process.env.DEEPSEEK_HOST = host;
+  }
+});
