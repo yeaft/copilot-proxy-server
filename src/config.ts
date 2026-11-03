@@ -13,6 +13,11 @@ export interface Config {
   vsCodeVersion: string;
   dataDir: string;
   authOnly: boolean;
+  copilotEnabled: boolean;
+  lokiEnabled: boolean;
+  lokiEnvironment: "prod" | "msit" | "sdf";
+  lokiAuthOnly: boolean;
+  lokiDeviceCode: boolean;
 }
 
 function getDataDir(): string {
@@ -24,13 +29,30 @@ function getDataDir(): string {
   return path.join(os.homedir(), ".local", "share", "copilot-proxy");
 }
 
+function enabled(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${name} must be true or false.`);
+}
+
 export function loadConfig(): Config {
   const args = process.argv.slice(2);
   const authOnly = args.includes("--auth");
-
+  const lokiAuthOnly = args.includes("--loki-auth");
+  if (authOnly && lokiAuthOnly) throw new Error("Choose --auth or --loki-auth, not both.");
+  const lokiEnvironment = process.env.LOKI_ENVIRONMENT || "prod";
+  if (lokiEnvironment !== "prod" && lokiEnvironment !== "msit" && lokiEnvironment !== "sdf") {
+    throw new Error("LOKI_ENVIRONMENT must be prod, msit, or sdf.");
+  }
+  const copilotEnabled = enabled("COPILOT_ENABLED", true);
+  const lokiEnabled = enabled("LOKI_ENABLED", false);
+  if (!authOnly && !lokiAuthOnly && !copilotEnabled && !lokiEnabled) {
+    throw new Error("Enable at least one provider: COPILOT_ENABLED or LOKI_ENABLED.");
+  }
   const rateLimitRaw = process.env.RATE_LIMIT_SECONDS;
-  const rateLimit =
-    rateLimitRaw !== undefined ? parseInt(rateLimitRaw, 10) : undefined;
+  const rateLimit = rateLimitRaw !== undefined ? parseInt(rateLimitRaw, 10) : undefined;
 
   return {
     port: parseInt(process.env.PORT || "6628", 10),
@@ -43,6 +65,11 @@ export function loadConfig(): Config {
     vsCodeVersion: process.env.VSCODE_VERSION || "1.109.2",
     dataDir: getDataDir(),
     authOnly,
+    copilotEnabled,
+    lokiEnabled,
+    lokiEnvironment,
+    lokiAuthOnly,
+    lokiDeviceCode: args.includes("--device-code"),
   };
 }
 

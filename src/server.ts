@@ -4,8 +4,9 @@ import { cors } from "hono/cors";
 import { logger as honoLogger } from "hono/logger";
 
 import { state } from "./lib/state.js";
-import { cacheModels } from "./services/copilot-models.js";
-import { forwardError } from "./lib/error.js";
+import { HTTPError, forwardError } from "./lib/error.js";
+import { getModelCatalog } from "./services/model-catalog.js";
+import { lokiRouting, lokiError } from "./routes/loki.js";
 
 import { completionRoutes } from "./routes/chat-completions/route.js";
 import { messageRoutes } from "./routes/messages/route.js";
@@ -59,7 +60,7 @@ app.use("*", async (c, next) => {
   }
 
   // Constant-time comparison to prevent timing attacks
-  if (providedKey.length !== state.apiKey.length) {
+  if (Buffer.byteLength(providedKey) !== Buffer.byteLength(state.apiKey)) {
     return c.json({ error: "Invalid API key." }, 403);
   }
 
@@ -71,6 +72,8 @@ app.use("*", async (c, next) => {
 
   return next();
 });
+
+app.use("*", lokiRouting);
 
 // Health check
 app.get("/", (c) =>
@@ -84,19 +87,7 @@ app.get("/", (c) =>
 // Models endpoint
 app.get("/v1/models", async (c) => {
   try {
-    if (!state.models) {
-      await cacheModels();
-    }
-
-    const models = state.models?.data.map((model) => ({
-      id: model.id,
-      object: "model",
-      type: "model",
-      created: 0,
-      created_at: new Date(0).toISOString(),
-      owned_by: model.vendor,
-      display_name: model.name,
-    }));
+    const models = await getModelCatalog();
 
     return c.json({
       object: "list",
@@ -104,7 +95,7 @@ app.get("/v1/models", async (c) => {
       has_more: false,
     });
   } catch (error) {
-    return await forwardError(c, error);
+    return error instanceof HTTPError ? forwardError(c, error) : lokiError(c, error);
   }
 });
 

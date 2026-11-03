@@ -4,6 +4,7 @@ import { streamSSE } from "hono/streaming";
 import { forwardError } from "../../lib/error.js";
 import { logger } from "../../lib/logger.js";
 import { state } from "../../lib/state.js";
+import { isLokiModel } from "../loki.js";
 import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
 import { logUsage } from "../../lib/db.js";
@@ -33,6 +34,12 @@ geminiRoutes.post(
 
       const { modelWithMethod } = c.req.param();
       const modelId = modelWithMethod.split(":")[0];
+      if (isLokiModel(modelId)) {
+        return c.json({ error: { code: 400, message: "Loki models do not support the Gemini API. Use Chat Completions, Responses or Messages.", status: "INVALID_ARGUMENT" } }, 400);
+      }
+      if (!state.copilotEnabled) {
+        return c.json({ error: { code: 503, message: "Copilot provider is disabled.", status: "UNAVAILABLE" } }, 503);
+      }
       const requestBody =
         await c.req.json<GeminiGenerateContentRequest>();
 
@@ -88,6 +95,12 @@ geminiRoutes.post(
 
       const { modelWithMethod } = c.req.param();
       const modelId = modelWithMethod.split(":")[0];
+      if (isLokiModel(modelId)) {
+        return c.json({ error: { code: 400, message: "Loki models do not support the Gemini API. Use Chat Completions, Responses or Messages.", status: "INVALID_ARGUMENT" } }, 400);
+      }
+      if (!state.copilotEnabled) {
+        return c.json({ error: { code: 503, message: "Copilot provider is disabled.", status: "UNAVAILABLE" } }, 503);
+      }
       const requestBody =
         await c.req.json<GeminiGenerateContentRequest>();
 
@@ -166,6 +179,12 @@ geminiRoutes.post(
     try {
       const { modelWithMethod } = c.req.param();
       const modelId = modelWithMethod.split(":")[0];
+      if (isLokiModel(modelId)) {
+        return c.json({ error: { code: 400, message: "Loki models do not support the Gemini API. Use Chat Completions, Responses or Messages.", status: "INVALID_ARGUMENT" } }, 400);
+      }
+      if (!state.copilotEnabled) {
+        return c.json({ error: { code: 503, message: "Copilot provider is disabled.", status: "UNAVAILABLE" } }, 503);
+      }
       const requestBody =
         await c.req.json<GeminiGenerateContentRequest>();
 

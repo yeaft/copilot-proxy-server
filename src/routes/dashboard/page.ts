@@ -88,7 +88,7 @@ export function getDashboardHtml(): string {
       <div class="card"><div class="card-label">Cache Read</div><div class="card-value" id="stat-cached-tokens">-</div></div>
       <div class="card"><div class="card-label">Cache Write</div><div class="card-value" id="stat-cache-write-tokens">-</div></div>
       <div class="card"><div class="card-label">Output Tokens</div><div class="card-value" id="stat-output-tokens">-</div></div>
-      <div class="card"><div class="card-label">Total Tokens</div><div class="card-value" id="stat-tokens">-</div></div>
+      <div class="card"><div class="card-label">Known Tokens</div><div class="card-value" id="stat-tokens">-</div><div class="card-sub" id="stat-unknown-usage"></div></div>
       <div class="card"><div class="card-label">Estimated Cost</div><div class="card-value" id="stat-cost">-</div><div class="card-sub" id="stat-credits"></div></div>
       <div class="card"><div class="card-label">Active IPs</div><div class="card-value" id="stat-ips">-</div></div>
       <div class="card"><div class="card-label">Cache Hit Rate</div><div class="card-value" id="stat-cache-rate">-</div><div class="card-sub">Share of input tokens read from cache</div></div>
@@ -252,6 +252,8 @@ export function getDashboardHtml(): string {
     document.getElementById('stat-cache-write-tokens').textContent = fmt(s.total_cache_write_prompt_tokens);
     document.getElementById('stat-output-tokens').textContent = fmt(s.total_completion_tokens);
     document.getElementById('stat-tokens').textContent = fmt(s.total_tokens);
+    document.getElementById('stat-unknown-usage').textContent = s.unknown_usage_requests
+      ? fmt(s.unknown_usage_requests) + ' requests with unknown usage (not zero)' : '';
     document.getElementById('stat-cost').textContent = '$' + Number(s.total_cost_usd).toFixed(2);
     document.getElementById('stat-credits').textContent = Number(s.total_credits).toFixed(2) + ' credits' + (s.unpriced_tokens ? ' · ' + fmt(s.unpriced_tokens) + ' unpriced tokens' : '');
     document.getElementById('stat-ips').textContent = s.active_ips;

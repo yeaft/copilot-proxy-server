@@ -1,4 +1,7 @@
 import { serve } from "@hono/node-server";
+import { join } from "node:path";
+import { LokiAuthentication } from "./auth/loki-auth.js";
+import { LokiProvider } from "./services/loki.js";
 
 import { loadConfig, ensureDataDir } from "./config.js";
 import { logger } from "./lib/logger.js";
@@ -24,6 +27,7 @@ async function main() {
   state.vsCodeVersion = config.vsCodeVersion;
   state.rateLimitSeconds = config.rateLimitSeconds;
   state.apiKey = config.apiKey;
+  state.copilotEnabled = config.copilotEnabled;
 
   if (config.apiKey) {
     logger.info("API key authentication enabled");
@@ -36,33 +40,41 @@ async function main() {
   // Ensure data directory exists
   await ensureDataDir(config.dataDir);
 
-  // Initialize usage tracking database
-  await initDatabase(config.dataDir);
-
-  // Setup GitHub token
-  await setupGitHubToken({
-    dataDir: config.dataDir,
-    providedToken: config.githubToken,
-    force: config.authOnly,
-  });
-
-  // Auth-only mode: exit after getting token
+  // Explicit authentication commands do not start HTTP servers or modify usage databases.
+  if (config.lokiAuthOnly) {
+    const auth = new LokiAuthentication(join(config.dataDir, "loki"));
+    await auth.signIn(config.lokiDeviceCode, (message) => logger.info(message));
+    logger.info("Microsoft Loki sign-in completed. Credentials saved in DATA_DIR/loki/auth.");
+    return;
+  }
   if (config.authOnly) {
-    logger.info("Auth completed. Token saved.");
-    process.exit(0);
+    await setupGitHubToken({ dataDir: config.dataDir, providedToken: config.githubToken, force: true });
+    logger.info("GitHub authentication completed. Token saved.");
+    return;
   }
 
-  // Exchange for Copilot token
-  await setupCopilotToken();
+  await initDatabase(config.dataDir);
+
+  if (config.lokiEnabled) {
+    state.loki = new LokiProvider({
+      tokens: new LokiAuthentication(join(config.dataDir, "loki")),
+      environment: config.lokiEnvironment,
+    });
+    // Never initiate interactive login during server startup (especially in Docker).
+    logger.info(`Native Microsoft Loki provider enabled (${config.lokiEnvironment}).`);
+  }
+
+  if (config.copilotEnabled) {
+    await setupGitHubToken({ dataDir: config.dataDir, providedToken: config.githubToken });
+    await setupCopilotToken();
+    await cacheModels();
+  }
 
   // Setup DeepSeek API key (independent of Copilot, no device flow needed)
   await setupDeepseekToken({
     dataDir: config.dataDir,
     providedToken: config.deepseekApiKey,
   });
-
-  // Cache available models
-  await cacheModels();
 
   if (state.models) {
     logger.info(
@@ -71,7 +83,7 @@ async function main() {
   }
 
   // Start the server
-  const server = serve({
+  serve({
     fetch: app.fetch,
     port: config.port,
   });
