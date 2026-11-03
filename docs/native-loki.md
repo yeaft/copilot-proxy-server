@@ -22,6 +22,11 @@ npm start
 
 Authentication prefers the optional Windows sign-in broker (WAM); otherwise it uses
 browser PKCE. Use `npm run auth:loki -- --device-code` for headless sign-in.
+Identity HTTP requests have a 15-second deadline covering headers and body. Ordinary
+broker silent acquisition uses a short-lived, terminable Node child solely to isolate
+uncancellable native SDK work; it is not a Loki server, listener or daemon. No cache
+or token is placed in its command-line arguments. A timeout ends that child before
+releasing the authentication cache lock.
 Token refresh and the private MSAL cache live in `DATA_DIR/loki/auth`. No credentials
 are imported from another Loki installation. Never commit or share this directory.
 The server never opens an interactive Microsoft sign-in on startup: missing/expired
