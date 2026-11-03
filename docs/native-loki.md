@@ -55,6 +55,8 @@ Chat Completions, Responses, Messages and Messages `count_tokens` are forwarded 
 their matching native upstream endpoints. Unknown request fields are retained and
 SSE response bytes are not translated/re-encoded. Request JSON is reserialized to
 remove the `loki/` routing prefix; original request whitespace is not preserved.
+Loki JSON bodies are limited to 32 MiB (UTF-8 bytes including whitespace); existing
+Copilot/DeepSeek body limits are unchanged.
 Per-model protocol availability is determined by the upstream. Gemini conversion and
 WebSocket Responses are **not supported** for Loki models.
 
@@ -63,6 +65,10 @@ tokens are used only for the trusted Office endpoint. A 401 triggers at most one
 attempt and one retry. Browser/device-code credentials support silent forced refresh.
 The current Windows broker SDK does not implement forced renewal; a rejected broker
 token requires `npm run auth:loki` again rather than silently reusing the rejected token.
+Run it with the same `DATA_DIR` as the server. A successful interactive login rotates a
+cache generation; the running server detects it on the next request without a restart.
+Ordinary silent-refresh writes do not release rejected tokens, and a broker returning
+the same rejected token still requires a new sign-in.
 Client disconnect cancels upstream work; the five-minute timeout is an
 **idle** timeout rather than a total stream duration limit.
 

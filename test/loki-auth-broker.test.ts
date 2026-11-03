@@ -65,7 +65,7 @@ test("forced broker calls are never started; rejection quarantines tokens, frees
       },
     } as AuthenticationResult;
     const broker = {
-      acquireTokenInteractive: async () => { interactive++; return granted; },
+      acquireTokenInteractive: async () => { interactive++; return { ...granted, accessToken: `private-token-${interactive}` }; },
       acquireTokenSilent: () => { silent++; return new Promise(() => {}); },
     } as unknown as PublicClientApplication;
     class BrokerAuthentication extends LokiAuthentication {
@@ -74,7 +74,7 @@ test("forced broker calls are never started; rejection quarantines tokens, frees
     }
     const auth = new BrokerAuthentication(directory);
     await auth.signIn(false, () => {});
-    assert.equal(await auth.getToken(), granted.accessToken, "fresh interactive token remains usable");
+    assert.equal(await auth.getToken(), "private-token-1", "fresh interactive token remains usable");
     const path = join(directory, "auth", "cache.json");
     const before = await readFile(path, "utf8");
     assert.doesNotMatch(before, /private-token|private-id-token/);
@@ -97,7 +97,7 @@ test("forced broker calls are never started; rejection quarantines tokens, frees
     // background silent callback can race this write after rejection.
     await auth.signIn(false, () => {});
     assert.equal(interactive, 2);
-    assert.equal(await auth.getToken(), granted.accessToken);
+    assert.equal(await auth.getToken(), "private-token-2");
     assert.equal(silent, 0);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -2,6 +2,7 @@ import {
   InteractionRequiredAuthError, PublicClientApplication,
   type AccountInfo, type AuthenticationResult, type Configuration,
 } from "@azure/msal-node";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { browserSignIn } from "./loki-browser.js";
@@ -46,6 +47,8 @@ export interface AccessToken {
 }
 
 type PendingRefresh = { promise: Promise<string>; forced: boolean };
+type BrokerToken = { generation: string | undefined; hash: string };
+const tokenHash = (token: string): string => createHash("sha256").update(token).digest("hex");
 
 export class LokiAuthentication implements TokenSource {
   private readonly client = new PublicClientApplication({
@@ -55,7 +58,8 @@ export class LokiAuthentication implements TokenSource {
   private readonly directory: string;
   private prepared: Promise<void> | undefined;
   private current: AccessToken | undefined;
-  private brokerRejected = false;
+  private brokerRejected: { generation: string | undefined; hash: string | undefined } | undefined;
+  private brokerToken: BrokerToken | undefined;
   private pending: PendingRefresh | undefined;
   private nativeClient: Promise<PublicClientApplication | undefined> | undefined;
 
@@ -81,8 +85,8 @@ export class LokiAuthentication implements TokenSource {
     })();
   }
 
-  private async cached<T>(action: (accountId: string | undefined, brokerAccount: BrokerAccount | undefined) => Promise<{
-    value: T; accountId?: string; brokerAccount?: BrokerAccount | null;
+  private async cached<T>(action: (accountId: string | undefined, brokerAccount: BrokerAccount | undefined, generation: string | undefined) => Promise<{
+    value: T; accountId?: string; brokerAccount?: BrokerAccount | null; generation?: string;
   }>, replaceInvalid = false): Promise<T> {
     try {
       this.prepared ??= privateDirectory(this.directory).catch((error: unknown) => {
@@ -97,6 +101,7 @@ export class LokiAuthentication implements TokenSource {
         cache.deserialize("{}");
         let accountId: string | undefined;
         let brokerAccount: BrokerAccount | undefined;
+        let generation: string | undefined;
         let text: string | undefined;
         try {
           const info = await lstat(path);
@@ -123,6 +128,9 @@ export class LokiAuthentication implements TokenSource {
             if (!isObject(serialized) || ["Account", "IdToken", "AccessToken", "RefreshToken", "AppMetadata"]
               .some((key) => serialized[key] !== undefined && (!isObject(serialized[key])
                 || Object.values(serialized[key]).some((entry) => !isObject(entry))))) throw new Error("Invalid cache");
+            if (stored.generation !== undefined && (typeof stored.generation !== "string"
+              || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(stored.generation))) throw new Error("Invalid cache");
+            generation = stored.generation;
             accountId = stored.accountId;
             if (stored.brokerAccount !== undefined) {
               if (!isBrokerAccount(stored.brokerAccount) || stored.brokerAccount.homeAccountId !== accountId) throw new Error("Invalid cache");
@@ -135,16 +143,18 @@ export class LokiAuthentication implements TokenSource {
             // authentication succeeds. Unsafe filesystem entries still fail closed.
             accountId = undefined;
             brokerAccount = undefined;
+            generation = undefined;
             cache.deserialize("{}");
           }
         }
         const before = cache.serialize();
-        const result = await action(accountId, brokerAccount);
+        const result = await action(accountId, brokerAccount, generation);
         const serialized = cache.serialize();
         assertHeld();
-        if (serialized !== before || result.accountId !== undefined || result.brokerAccount !== undefined) {
+        if (serialized !== before || result.accountId !== undefined || result.brokerAccount !== undefined || result.generation !== undefined) {
           await atomicWrite(path, JSON.stringify({
             accountId: result.accountId ?? accountId, cache: serialized,
+            generation: result.generation ?? generation,
             brokerAccount: result.brokerAccount === null ? undefined : result.brokerAccount ?? brokerAccount,
           }));
         }
@@ -161,7 +171,6 @@ export class LokiAuthentication implements TokenSource {
   }
 
   async getToken(forceRefresh = false): Promise<string> {
-    if (this.brokerRejected) throw new LokiSignInRequired(`The Windows broker token was rejected; an interactive sign-in is required. ${signInHint}`);
     if (forceRefresh) this.current = undefined;
     if (this.pending) {
       if (!forceRefresh || this.pending.forced) return this.pending.promise;
@@ -169,7 +178,7 @@ export class LokiAuthentication implements TokenSource {
       // subsequent forced refresh. Serialize it so an older result cannot win.
       return this.startRefresh(true, this.pending.promise);
     }
-    if (this.current && this.current.expiresAt - Date.now() > refreshMargin) return this.current.value;
+    if (!this.brokerRejected && this.current && this.current.expiresAt - Date.now() > refreshMargin) return this.current.value;
     return this.startRefresh(forceRefresh);
   }
 
@@ -193,29 +202,51 @@ export class LokiAuthentication implements TokenSource {
   }
 
   protected async acquire(forceRefresh: boolean): Promise<AccessToken> {
-    return this.cached(async (accountId, brokerAccount) => {
+    // Remember rejection even if reading the shared cache fails. A later cache
+    // repair must not make this instance reuse the token that received a 401.
+    if (forceRefresh && this.brokerToken && !this.brokerRejected) this.brokerRejected = { ...this.brokerToken };
+    const token = await this.cached(async (accountId, brokerAccount, generation) => {
+      if (brokerAccount && forceRefresh && !this.brokerRejected) {
+        this.brokerRejected = { generation, hash: undefined };
+      }
+      // Only a successful explicit login rotates this marker. Cache writes from
+      // silent refreshes, old caches, or failed sign-ins cannot release quarantine.
+      if (this.brokerRejected && (!generation || generation === this.brokerRejected.generation)) {
+        throw new LokiSignInRequired(`The Windows sign-in broker cannot guarantee a forced token refresh; sign in again. ${signInHint}`);
+      }
       if (brokerAccount) {
         // msal-node-extensions 5.5.4 dist/broker/NativeBrokerPlugin.mjs:
         // acquireTokenSilent (142-181) / generateRequestParameters (314-359)
         // never map forceRefresh to native runtime parameters. Do not retry a
         // 401 with the same broker token or fall back to an unbound token.
-        if (forceRefresh) {
-          this.brokerRejected = true;
-          throw new LokiSignInRequired(`The Windows sign-in broker cannot guarantee a forced token refresh. ${signInHint}`);
-        }
-        return { value: await this.acquireBrokerToken(brokerAccount) };
+        const token = this.acceptToken(await this.acquireBrokerToken(brokerAccount));
+        this.brokerToken = { generation, hash: tokenHash(token.value) };
+        return { value: token };
       }
       const account = accountId ? await this.client.getTokenCache().getAccountByHomeId(accountId) : null;
       if (!account) throw new LokiSignInRequired(`Not signed in. ${signInHint}`);
       try {
         const result = await this.client.acquireTokenSilent({ account, scopes, forceRefresh });
         if (!result.accessToken) throw new LokiAuthError(`No access token returned. ${signInHint}`);
-        return { value: { value: result.accessToken, expiresAt: result.expiresOn?.getTime() ?? 0 } };
+        const token = this.acceptToken({ value: result.accessToken, expiresAt: result.expiresOn?.getTime() ?? 0 });
+        this.brokerToken = undefined;
+        return { value: token };
       } catch (error) {
+        if (error instanceof LokiAuthError) throw error;
         if (requiresInteraction(error)) throw new LokiSignInRequired(safeAuthError(error).message);
         throw new LokiAuthError(`Could not refresh the sign-in (${authErrorDetail(error)}). Check the network connection. ${signInHint}`);
       }
     });
+    // Do not release quarantine if the cache lock/write failed after acquisition.
+    this.brokerRejected = undefined;
+    return token;
+  }
+
+  private acceptToken(token: AccessToken): AccessToken {
+    if (this.brokerRejected?.hash === tokenHash(token.value)) {
+      throw new LokiSignInRequired(`The Windows broker returned the rejected token; sign in again. ${signInHint}`);
+    }
+    return token;
   }
 
   protected async acquireBrokerToken(account: AccountInfo): Promise<AccessToken> {
@@ -230,8 +261,11 @@ export class LokiAuthentication implements TokenSource {
     if (this.pending) await this.pending.promise.catch(() => {});
     this.current = undefined;
     let granted: AuthenticationResult | undefined;
+    let selectedBroker = false;
+    const generation = randomUUID();
     await this.cached(async () => {
       const broker = deviceCode ? undefined : await this.brokerClient();
+      selectedBroker = !!broker;
       if (broker) {
         notify("Opening Windows sign-in for your work account...");
         try {
@@ -250,9 +284,12 @@ export class LokiAuthentication implements TokenSource {
         granted = await this.interactive(scopes, deviceCode, notify);
       }
       if (!granted.account || !granted.accessToken) throw new LokiAuthError("Sign-in did not return an account and access token.");
+      if (this.brokerRejected?.hash === tokenHash(granted.accessToken)) {
+        throw new LokiSignInRequired(`Sign-in returned the rejected token; sign in again. ${signInHint}`);
+      }
       const account = granted.account;
       return {
-        value: undefined, accountId: account.homeAccountId,
+        value: undefined, accountId: account.homeAccountId, generation,
         brokerAccount: broker ? {
           homeAccountId: account.homeAccountId, environment: account.environment, tenantId: account.tenantId,
           username: account.username, localAccountId: account.localAccountId, nativeAccountId: account.nativeAccountId!,
@@ -260,7 +297,8 @@ export class LokiAuthentication implements TokenSource {
       };
     }, true);
     if (granted) {
-      this.brokerRejected = false;
+      this.brokerRejected = undefined;
+      this.brokerToken = selectedBroker ? { generation, hash: tokenHash(granted.accessToken) } : undefined;
       this.current = { value: granted.accessToken, expiresAt: granted.expiresOn?.getTime() ?? 0 };
     }
   }
@@ -274,7 +312,7 @@ export class LokiAuthentication implements TokenSource {
             // Only a verification URL and user code are intentionally exposed, never
             // arbitrary SDK/server messages, tokens, tenant IDs, or account details.
             const url = new URL(response.verificationUri);
-            if (url.protocol !== "https:" || !["microsoft.com", "www.microsoft.com", "login.microsoftonline.com"]
+            if (url.protocol !== "https:" || !["microsoft.com", "www.microsoft.com", "login.microsoft.com", "login.microsoftonline.com"]
               .includes(url.hostname) || !/^[A-Z0-9-]{4,32}$/i.test(response.userCode)) {
               throw new LokiAuthError("Invalid device sign-in instructions.");
             }

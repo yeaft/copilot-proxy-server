@@ -232,3 +232,31 @@ test("real client disconnect closes the native upstream stream", async () => {
     await closed;
   } finally { abort.abort(); clearTimeout(timeout!); onStreamingClosed = undefined; }
 });
+
+
+test("DeepSeek's actual legacy route accepts bodies above 32 MiB even with Loki disabled", async () => {
+  const key = state.deepseekApiKey;
+  const host = process.env.DEEPSEEK_HOST;
+  const provider = state.loki;
+  const body = JSON.stringify({ model: "deepseek-v4-pro", messages: [] }) + " ".repeat(32 * 1024 * 1024);
+  state.deepseekApiKey = "deepseek-large-body-test-key";
+  process.env.DEEPSEEK_HOST = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+  try {
+    for (const enabled of [false, true]) {
+      state.loki = enabled ? provider : undefined;
+      const count = requests.length;
+      const response = await fetch(`${base}/v1/chat/completions`, { method: "POST",
+        headers: { authorization: "Bearer client-only-key", "content-type": "application/json" }, body });
+      assert.equal(response.status, 200);
+      await response.text();
+      assert.equal(requests.length, count + 1);
+      assert.equal(requests.at(-1)!.headers.authorization, "Bearer deepseek-large-body-test-key");
+      assert.equal(requests.at(-1)!.payload.model, "deepseek-v4-pro");
+    }
+  } finally {
+    state.loki = provider;
+    state.deepseekApiKey = key;
+    if (host === undefined) delete process.env.DEEPSEEK_HOST;
+    else process.env.DEEPSEEK_HOST = host;
+  }
+});

@@ -79,6 +79,8 @@ test("invalid caches are not overwritten and never expose their contents or path
     '{"cache":"[]","accountId":"user"}', '{"cache":"{}","accountId":3}',
     '{"cache":"{\\"Account\\":3}","accountId":"user"}',
     '{"cache":"{}","accountId":"user","brokerAccount":{"nativeAccountId":"secret"}}',
+    '{"cache":"{}","accountId":"user","generation":3}',
+    '{"cache":"{}","accountId":"user","generation":"invalid"}',
   ]) {
     await writeFile(path, text);
     await assert.rejects(new LokiAuthentication(directory).getToken(), (error: Error) => {
@@ -278,7 +280,7 @@ test("explicit device-code uses the MSAL device API, bypasses the broker and nev
     assert.deepEqual(request.scopes, scopes);
     assert.equal(request.timeout, 300);
     request.deviceCodeCallback({
-      verificationUri: "https://microsoft.com/devicelogin", userCode: "TEST-CODE",
+      verificationUri: "https://login.microsoft.com/device", userCode: "ABCD123EF",
       message: "private-token private-account",
     });
     this.getTokenCache().deserialize(serializedAccountCache());
@@ -287,7 +289,7 @@ test("explicit device-code uses the MSAL device API, bypasses the broker and nev
   const messages: string[] = [];
   const auth = new LokiAuthentication(directory);
   await auth.signIn(true, (message) => messages.push(message));
-  assert.match(messages.join("\n"), /https:\/\/microsoft.com\/devicelogin.*TEST-CODE/);
+  assert.match(messages.join("\n"), /https:\/\/login.microsoft.com\/device.*ABCD123EF/);
   assert.doesNotMatch(messages.join("\n"), /private-token|private-account|mock-access-token/);
   assert.equal(await auth.getToken(), result.accessToken);
   assert.equal((await new LokiAuthentication(directory).account())?.homeAccountId, account.homeAccountId);
@@ -417,6 +419,8 @@ test("explicit sign-in repairs invalid cache structures and oversized files with
     "null", "[]", '{"cache":"null","accountId":"user"}',
     '{"cache":"{\\"Account\\":3}","accountId":"user"}',
     '{"cache":"{}","accountId":"user","brokerAccount":{"nativeAccountId":"secret"}}',
+    '{"cache":"{}","accountId":"user","generation":3}',
+    '{"cache":"{}","accountId":"user","generation":"invalid"}',
     "x".repeat(16 * 1024 * 1024 + 1),
   ]) {
     await writeFile(path, corrupt);
@@ -483,4 +487,118 @@ test("explicit sign-in repairs malformed JSON only after successful authenticati
   assert.equal(await readFile(path, "utf8"), corrupt);
   await new MockAuthentication(directory, mockBroker()).signIn(false, () => {});
   assert.equal((await new MockAuthentication(directory).account())?.homeAccountId, account.homeAccountId);
+}));
+
+test("device instructions allow only exact official HTTPS hosts and valid user codes", async (context) => temporary(async (directory) => {
+  let verificationUri = "";
+  let userCode = "ABCD123EF";
+  context.mock.method(PublicClientApplication.prototype, "acquireTokenByDeviceCode", async (request: {
+    deviceCodeCallback: (value: object) => void;
+  }) => {
+    request.deviceCodeCallback({ verificationUri, userCode, message: "private-token private-account" });
+    return { ...result, fromPlatformBroker: false };
+  });
+  for (const host of ["microsoft.com", "www.microsoft.com", "login.microsoft.com", "login.microsoftonline.com"]) {
+    verificationUri = `https://${host}/device`;
+    const messages: string[] = [];
+    await new LokiAuthentication(directory).signIn(true, (message) => messages.push(message));
+    assert.deepEqual(messages, [`Open ${verificationUri} and enter code ${userCode} to sign in.`]);
+  }
+  for (verificationUri of [
+    "https://evil.invalid/device", "https://login.microsoft.com.evil.invalid/device",
+    "https://evil.login.microsoft.com/device", "http://login.microsoft.com/device",
+    "http://microsoft.com/devicelogin",
+  ]) {
+    const messages: string[] = [];
+    await assert.rejects(new LokiAuthentication(directory).signIn(true, (message) => messages.push(message)), /Invalid device sign-in instructions/);
+    assert.deepEqual(messages, []);
+  }
+  verificationUri = "https://login.microsoft.com/device";
+  for (userCode of ["BAD!CODE", "ABC", "A".repeat(33)]) {
+    await assert.rejects(new LokiAuthentication(directory).signIn(true, () => assert.fail("must not notify")), /Invalid device sign-in instructions/);
+  }
+}));
+
+test("a running rejected broker session recovers only after independent successful login and a different token", async () => temporary(async (directory) => {
+  let silentToken = result.accessToken;
+  let silentCalls = 0;
+  const broker = mockBroker({ acquireTokenSilent: async () => {
+    silentCalls++;
+    return { ...result, accessToken: silentToken };
+  } });
+  const service = new MockAuthentication(directory, broker);
+  await service.signIn(false, () => {});
+  const path = join(directory, "auth", "cache.json");
+  const before = await readFile(path, "utf8");
+  await writeFile(path, "null");
+  await assert.rejects(service.getToken(true), /Invalid credential cache/);
+  await writeFile(path, before);
+  await assert.rejects(service.getToken(), LokiSignInRequired, "cache repair cannot resurrect the rejected token");
+  // Rewriting ordinary MSAL cache data cannot masquerade as an explicit login.
+  const stored = JSON.parse(before);
+  stored.cache = JSON.stringify({ AppMetadata: { offline: { client_id: "offline-client" } } });
+  await writeFile(path, JSON.stringify(stored));
+  await assert.rejects(service.getToken(), LokiSignInRequired);
+  assert.equal(silentCalls, 0);
+  const failingCli = new MockAuthentication(directory, mockBroker({ acquireTokenInteractive: async () => { throw new Error("offline failure"); } }));
+  const unchanged = await readFile(path, "utf8");
+  await assert.rejects(failingCli.signIn(false, () => {}), LokiAuthError);
+  assert.equal(await readFile(path, "utf8"), unchanged);
+  await assert.rejects(service.getToken(), LokiSignInRequired);
+  // Same-instance re-login cannot accept the very token quarantined by its 401.
+  await assert.rejects(service.signIn(false, () => {}), /returned the rejected token/);
+  assert.equal(await readFile(path, "utf8"), unchanged);
+
+  const moduleUrl = new URL("../src/auth/loki-auth.ts", import.meta.url).href;
+  const login = async (token: string) => {
+    const code = `
+      import { LokiAuthentication } from ${JSON.stringify(moduleUrl)};
+      class OfflineCli extends LokiAuthentication {
+        async brokerClient() { return { acquireTokenInteractive: async () => ({
+          fromPlatformBroker: true, accessToken: ${JSON.stringify(token)},
+          account: ${JSON.stringify(account)}, expiresOn: new Date(Date.now() + 3600000),
+        }) }; }
+      }
+      await new OfflineCli(${JSON.stringify(directory)}).signIn(false, () => {});
+    `;
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
+        cwd: fileURLToPath(new URL("..", import.meta.url)), stdio: ["ignore", "ignore", "pipe"],
+      });
+      let diagnostics = "";
+      child.stderr.on("data", (chunk) => { diagnostics += chunk; });
+      child.once("error", reject);
+      child.once("exit", (status) => status === 0 ? resolve() : reject(new Error(diagnostics)));
+    });
+  };
+  await login(result.accessToken);
+  const firstLogin = JSON.parse(await readFile(path, "utf8"));
+  assert.notEqual(firstLogin.generation, stored.generation);
+  await assert.rejects(service.getToken(), /returned the rejected token/);
+  await assert.rejects(service.getToken(true), /returned the rejected token/);
+  assert.equal(silentCalls, 2, "new login permits isolated acquisition, never accepting the rejected token");
+  silentToken = "independently-renewed-token";
+  await login(silentToken);
+  assert.notEqual(JSON.parse(await readFile(path, "utf8")).generation, firstLogin.generation);
+  assert.deepEqual(await Promise.all(Array.from({ length: 5 }, () => service.getToken())), Array(5).fill(silentToken));
+  assert.equal(silentCalls, 3, "running service recovers without restart and shares one acquisition");
+  assert.equal(await service.getToken(), silentToken);
+}));
+
+test("ordinary successful silent-refresh writes preserve explicit login generation", async (context) => temporary(async (directory) => {
+  context.mock.method(PublicClientApplication.prototype, "acquireTokenByDeviceCode", async function (this: PublicClientApplication) {
+    this.getTokenCache().deserialize(serializedAccountCache());
+    return { ...result, fromPlatformBroker: false };
+  });
+  await new LokiAuthentication(directory).signIn(true, () => {});
+  const path = join(directory, "auth", "cache.json");
+  const before = JSON.parse(await readFile(path, "utf8"));
+  context.mock.method(PublicClientApplication.prototype, "acquireTokenSilent", async function (this: PublicClientApplication) {
+    this.getTokenCache().deserialize(serializedAccountCache().replace("test@example.invalid", "updated@example.invalid"));
+    return { ...result, accessToken: "offline-refreshed", fromPlatformBroker: false };
+  });
+  assert.equal(await new LokiAuthentication(directory).getToken(), "offline-refreshed");
+  const after = JSON.parse(await readFile(path, "utf8"));
+  assert.notEqual(after.cache, before.cache);
+  assert.equal(after.generation, before.generation);
 }));
