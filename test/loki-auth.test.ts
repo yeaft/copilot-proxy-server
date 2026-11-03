@@ -32,6 +32,11 @@ class MockAuthentication extends LokiAuthentication {
   browserCalls: { scopes: string[]; deviceCode: boolean }[] = [];
   constructor(directory: string, private readonly broker?: PublicClientApplication) { super(directory); }
   protected override async brokerClient(): Promise<PublicClientApplication | undefined> { return this.broker; }
+  protected override async acquireBrokerToken(selected: AccountInfo): Promise<AccessToken> {
+    if (!this.broker) throw new LokiSignInRequired("The Windows sign-in broker is unavailable.");
+    const granted = await this.broker.acquireTokenSilent({ account: selected, scopes, forceRefresh: false });
+    return { value: granted.accessToken, expiresAt: granted.expiresOn?.getTime() ?? 0 };
+  }
   protected override async interactive(requested: string[], deviceCode: boolean): Promise<AuthenticationResult> {
     this.browserCalls.push({ scopes: requested, deviceCode });
     return { ...result, fromPlatformBroker: false };
@@ -86,7 +91,7 @@ test("invalid caches are not overwritten and never expose their contents or path
   }
 }));
 
-test("broker sign-in persists identifiers only, survives restart, and forces a 401 refresh", async () => temporary(async (directory) => {
+test("broker sign-in persists identifiers only, survives restart; forced refresh requires explicit sign-in", async () => temporary(async (directory) => {
   const refreshes: { account: AccountInfo; forceRefresh: boolean }[] = [];
   const broker = mockBroker({
     acquireTokenInteractive: async (request: { scopes: string[]; prompt: string }) => {
@@ -111,14 +116,16 @@ test("broker sign-in persists identifiers only, survives restart, and forces a 4
   const restarted = new MockAuthentication(directory, broker);
   assert.equal((await restarted.account())?.nativeAccountId, account.nativeAccountId);
   assert.equal(await restarted.getToken(), "mock-refreshed-1");
-  // Upstream's 401 retry uses this explicit forced-refresh contract.
-  assert.equal(await restarted.getToken(true), "mock-refreshed-2");
-  assert.deepEqual(refreshes.map((request) => request.forceRefresh), [false, true]);
-  assert.equal(refreshes[0].account.homeAccountId, account.homeAccountId);
+  // Never claim that setting MSAL's forceRefresh forces the native broker.
+  await assert.rejects(auth.getToken(true), /cannot guarantee a forced token refresh.*npm run auth:loki/);
+  await assert.rejects(auth.getToken(), LokiSignInRequired, "a 401 evicts and quarantines the rejected broker token");
+  assert.deepEqual(refreshes.map((request) => request.forceRefresh), [false]);
+  assert.equal(await readFile(join(directory, "auth", "cache.json"), "utf8"), stored);
+  assert.deepEqual(await readdir(join(directory, "auth")), ["cache.json"]);
   assert.doesNotMatch(messages.join("\n"), /mock-access-token|mock-id-token/);
 }));
 
-test("a persisted broker account never silently falls back when the broker is unavailable", async () => temporary(async (directory) => {
+test("a persisted broker account never silently falls back to a non-broker token", async () => temporary(async (directory) => {
   await new MockAuthentication(directory, mockBroker()).signIn(false, () => {});
   const auth = new MockAuthentication(directory);
   assert.equal((await auth.account())?.homeAccountId, account.homeAccountId);
@@ -166,12 +173,15 @@ test("a broker that disappears during interactive sign-in fails closed", async (
   assert.deepEqual(auth.browserCalls, []);
 }));
 
-test("broker interaction-required errors are recognized across duplicated MSAL classes; network failures are retryable", async () => temporary(async (directory) => {
-  await new MockAuthentication(directory, mockBroker()).signIn(false, () => {});
-  for (const code of ["interaction_required", "consent_required", "login_required", "no_account_found", "network_error", "PRIVATE_TOKEN_ABC123"]) {
-    const auth = new MockAuthentication(directory, mockBroker({
-      acquireTokenSilent: async () => { throw Object.assign(new Error("private-token private-account"), { errorCode: code }); },
-    }));
+test("non-broker interaction-required errors are recognized across duplicated MSAL classes; network failures are retryable", async (context) => temporary(async (directory) => {
+  await mkdir(join(directory, "auth"));
+  await writeFile(join(directory, "auth", "cache.json"), JSON.stringify({ accountId: account.homeAccountId, cache: serializedAccountCache() }));
+  let code = "";
+  context.mock.method(PublicClientApplication.prototype, "acquireTokenSilent", async () => {
+    throw Object.assign(new Error("private-token private-account"), { errorCode: code });
+  });
+  const auth = new LokiAuthentication(directory);
+  for (code of ["interaction_required", "consent_required", "login_required", "no_account_found", "network_error", "PRIVATE_TOKEN_ABC123"]) {
     await assert.rejects(auth.getToken(), (error: Error) => {
       assert.ok(error instanceof LokiAuthError);
       assert.equal(error instanceof LokiSignInRequired, !["network_error", "PRIVATE_TOKEN_ABC123"].includes(code));

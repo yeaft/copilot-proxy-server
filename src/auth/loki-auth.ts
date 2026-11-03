@@ -10,6 +10,8 @@ import {
   safeAuthError, sanitizedError, signInHint,
 } from "./loki-errors.js";
 import { atomicWrite, privateDirectory, withLock } from "./loki-storage.js";
+import { LokiNetworkClient } from "./loki-network.js";
+import { isolatedBrokerToken } from "./loki-broker.js";
 
 export { LokiAuthError, LokiSignInRequired } from "./loki-errors.js";
 export type { AccountInfo } from "@azure/msal-node";
@@ -48,11 +50,12 @@ type PendingRefresh = { promise: Promise<string>; forced: boolean };
 export class LokiAuthentication implements TokenSource {
   private readonly client = new PublicClientApplication({
     auth: { clientId, authority },
-    system: { loggerOptions },
+    system: { loggerOptions, networkClient: new LokiNetworkClient() },
   });
   private readonly directory: string;
   private prepared: Promise<void> | undefined;
   private current: AccessToken | undefined;
+  private brokerRejected = false;
   private pending: PendingRefresh | undefined;
   private nativeClient: Promise<PublicClientApplication | undefined> | undefined;
 
@@ -71,7 +74,8 @@ export class LokiAuthentication implements TokenSource {
         const nativeBrokerPlugin = new NativeBrokerPlugin();
         if (!nativeBrokerPlugin.isBrokerAvailable) return undefined;
         return new PublicClientApplication({
-          auth: { clientId, authority }, broker: { nativeBrokerPlugin }, system: { loggerOptions },
+          auth: { clientId, authority }, broker: { nativeBrokerPlugin },
+          system: { loggerOptions, networkClient: new LokiNetworkClient() },
         });
       } catch { return undefined; }
     })();
@@ -157,6 +161,7 @@ export class LokiAuthentication implements TokenSource {
   }
 
   async getToken(forceRefresh = false): Promise<string> {
+    if (this.brokerRejected) throw new LokiSignInRequired(`The Windows broker token was rejected; an interactive sign-in is required. ${signInHint}`);
     if (forceRefresh) this.current = undefined;
     if (this.pending) {
       if (!forceRefresh || this.pending.forced) return this.pending.promise;
@@ -189,12 +194,21 @@ export class LokiAuthentication implements TokenSource {
 
   protected async acquire(forceRefresh: boolean): Promise<AccessToken> {
     return this.cached(async (accountId, brokerAccount) => {
-      const account = brokerAccount ?? (accountId ? await this.client.getTokenCache().getAccountByHomeId(accountId) : null);
+      if (brokerAccount) {
+        // msal-node-extensions 5.5.4 dist/broker/NativeBrokerPlugin.mjs:
+        // acquireTokenSilent (142-181) / generateRequestParameters (314-359)
+        // never map forceRefresh to native runtime parameters. Do not retry a
+        // 401 with the same broker token or fall back to an unbound token.
+        if (forceRefresh) {
+          this.brokerRejected = true;
+          throw new LokiSignInRequired(`The Windows sign-in broker cannot guarantee a forced token refresh. ${signInHint}`);
+        }
+        return { value: await this.acquireBrokerToken(brokerAccount) };
+      }
+      const account = accountId ? await this.client.getTokenCache().getAccountByHomeId(accountId) : null;
       if (!account) throw new LokiSignInRequired(`Not signed in. ${signInHint}`);
-      const client = brokerAccount ? await this.brokerClient() : this.client;
-      if (!client) throw new LokiSignInRequired(`The Windows sign-in broker is unavailable. Install optional dependencies. ${signInHint}`);
       try {
-        const result = await client.acquireTokenSilent({ account, scopes, forceRefresh });
+        const result = await this.client.acquireTokenSilent({ account, scopes, forceRefresh });
         if (!result.accessToken) throw new LokiAuthError(`No access token returned. ${signInHint}`);
         return { value: { value: result.accessToken, expiresAt: result.expiresOn?.getTime() ?? 0 } };
       } catch (error) {
@@ -202,6 +216,14 @@ export class LokiAuthentication implements TokenSource {
         throw new LokiAuthError(`Could not refresh the sign-in (${authErrorDetail(error)}). Check the network connection. ${signInHint}`);
       }
     });
+  }
+
+  protected async acquireBrokerToken(account: AccountInfo): Promise<AccessToken> {
+    if (process.platform !== "win32") {
+      throw new LokiSignInRequired(`The Windows sign-in broker is unavailable. ${signInHint}`);
+    }
+    // Never use nativeClient/shared MSAL state for non-cancellable silent calls.
+    return isolatedBrokerToken(account, { clientId, authority, scopes });
   }
 
   async signIn(deviceCode: boolean, notify: (message: string) => void): Promise<void> {
@@ -237,7 +259,10 @@ export class LokiAuthentication implements TokenSource {
         } : null,
       };
     }, true);
-    if (granted) this.current = { value: granted.accessToken, expiresAt: granted.expiresOn?.getTime() ?? 0 };
+    if (granted) {
+      this.brokerRejected = false;
+      this.current = { value: granted.accessToken, expiresAt: granted.expiresOn?.getTime() ?? 0 };
+    }
   }
 
   protected async interactive(requested: string[], deviceCode: boolean, notify: (message: string) => void): Promise<AuthenticationResult> {
