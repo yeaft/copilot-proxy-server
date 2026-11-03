@@ -3,8 +3,9 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-# Windows WAM/keychain native extensions are optional and cannot run in Alpine.
-RUN npm ci --omit=optional
+# The builder needs esbuild's platform-specific optional binary.
+# Runtime-only Windows broker dependencies are omitted in the final image below.
+RUN npm ci
 
 COPY tsconfig.json tsup.config.ts ./
 COPY src/ src/

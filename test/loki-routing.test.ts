@@ -14,6 +14,7 @@ let proxy: ReturnType<typeof serve>;
 let base: string;
 let requests: Array<{ path: string; payload: Record<string, unknown>; headers: Record<string, unknown> }> = [];
 let catalogStatus = 200;
+let onStreamingClosed: (() => void) | undefined;
 const oldState = { ...state };
 const nativeModel = "gpt-6.1-sol";
 
@@ -29,6 +30,12 @@ before(async () => {
     const payload = JSON.parse(Buffer.concat(chunks).toString());
     requests.push({ path: req.url!, payload, headers: req.headers });
     res.writeHead(200, { "content-type": payload.stream ? "text/event-stream" : "application/json" });
+    if (payload.disconnect_test) {
+      res.write('data: {"choices":[{"delta":{"content":"hello"}}]}\n\n');
+      const interval = setInterval(() => res.write(': heartbeat\n\n'), 20);
+      res.on("close", () => { clearInterval(interval); onStreamingClosed?.(); });
+      return;
+    }
     res.end(payload.stream ? 'event: response.completed\ndata: {"response":{"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
       : JSON.stringify({ ok: true, input_tokens: 7, usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } }));
   });
@@ -203,4 +210,25 @@ test("non-Loki DeepSeek requests still reach the existing provider in Loki-only 
     if (host === undefined) delete process.env.DEEPSEEK_HOST;
     else process.env.DEEPSEEK_HOST = host;
   }
+});
+
+test("real client disconnect closes the native upstream stream", async () => {
+  const abort = new AbortController();
+  let timeout: ReturnType<typeof setTimeout>;
+  const closed = new Promise<void>((resolve, reject) => {
+    onStreamingClosed = resolve;
+    timeout = setTimeout(() => reject(new Error("Upstream did not cancel after client disconnect")), 2000);
+  });
+  try {
+    const response = await fetch(`${base}/v1/responses`, { method: "POST", signal: abort.signal,
+      headers: { authorization: "Bearer client-only-key", "content-type": "application/json" },
+      body: JSON.stringify({ model: `loki/${nativeModel}`, stream: true, disconnect_test: true }),
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    assert.equal((await reader.read()).done, false);
+    abort.abort();
+    await reader.cancel().catch(() => {});
+    await closed;
+  } finally { abort.abort(); clearTimeout(timeout!); onStreamingClosed = undefined; }
 });
