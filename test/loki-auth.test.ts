@@ -400,6 +400,67 @@ test("browser callback policy errors are redacted; untrusted launcher URLs never
   }
 });
 
+test("explicit sign-in repairs invalid cache structures and oversized files without weakening read paths", async () => temporary(async (directory) => {
+  await mkdir(join(directory, "auth"));
+  const path = join(directory, "auth", "cache.json");
+  for (const corrupt of [
+    "null", "[]", '{"cache":"null","accountId":"user"}',
+    '{"cache":"{\\"Account\\":3}","accountId":"user"}',
+    '{"cache":"{}","accountId":"user","brokerAccount":{"nativeAccountId":"secret"}}',
+    "x".repeat(16 * 1024 * 1024 + 1),
+  ]) {
+    await writeFile(path, corrupt);
+    const auth = new MockAuthentication(directory, mockBroker({
+      acquireTokenInteractive: async () => {
+        assert.equal(await readFile(path, "utf8"), corrupt, "sign-in must not replace the cache before authentication");
+        throw new Error("mock authentication failed");
+      },
+    }));
+    await assert.rejects(auth.account(), LokiSignInRequired);
+    await assert.rejects(auth.getToken(), LokiSignInRequired);
+    await assert.rejects(auth.signIn(false, () => {}), LokiAuthError);
+    assert.equal(await readFile(path, "utf8"), corrupt);
+    await assert.rejects(auth.account(), LokiSignInRequired);
+    await assert.rejects(auth.getToken(), LokiSignInRequired);
+    const recovered = new MockAuthentication(directory, mockBroker({
+      acquireTokenInteractive: async () => {
+        assert.equal(await readFile(path, "utf8"), corrupt);
+        return result;
+      },
+    }));
+    await recovered.signIn(false, () => {});
+    assert.equal(await recovered.getToken(), result.accessToken);
+    const restarted = new MockAuthentication(directory, mockBroker());
+    assert.equal((await restarted.account())?.homeAccountId, account.homeAccountId);
+    assert.equal(await restarted.getToken(), "mock-refreshed-token");
+    assert.deepEqual(await readdir(join(directory, "auth")), ["cache.json"]);
+  }
+}));
+
+test("device sign-in preserves corrupt disk cache even if MSAL mutates memory before failing", async (context) => temporary(async (directory) => {
+  await mkdir(join(directory, "auth"));
+  const path = join(directory, "auth", "cache.json");
+  const corrupt = '{"private-token":broken';
+  await writeFile(path, corrupt);
+  let fail = true;
+  context.mock.method(PublicClientApplication.prototype, "acquireTokenByDeviceCode", async function (this: PublicClientApplication) {
+    assert.equal(await readFile(path, "utf8"), corrupt);
+    this.getTokenCache().deserialize(serializedAccountCache());
+    if (fail) throw new Error("mock authentication failed private-token");
+    return { ...result, fromPlatformBroker: false };
+  });
+  const auth = new LokiAuthentication(directory);
+  await assert.rejects(auth.signIn(true, () => {}), LokiAuthError);
+  assert.equal(await readFile(path, "utf8"), corrupt);
+  await assert.rejects(auth.account(), LokiSignInRequired);
+  await assert.rejects(auth.getToken(), LokiSignInRequired);
+  fail = false;
+  await auth.signIn(true, () => {});
+  assert.equal((await new LokiAuthentication(directory).account())?.homeAccountId, account.homeAccountId);
+  assert.equal(await auth.getToken(), result.accessToken);
+  assert.deepEqual(await readdir(join(directory, "auth")), ["cache.json"]);
+}));
+
 test("explicit sign-in repairs malformed JSON only after successful authentication", async () => temporary(async (directory) => {
   await mkdir(join(directory, "auth"));
   const path = join(directory, "auth", "cache.json");

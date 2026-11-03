@@ -96,10 +96,16 @@ export class LokiAuthentication implements TokenSource {
         let text: string | undefined;
         try {
           const info = await lstat(path);
-          if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) {
+          // Explicit sign-in may replace corrupt regular files, never unsafe
+          // filesystem entries. Do not read an oversized cache just to discard it.
+          if (!info.isFile() || info.isSymbolicLink()) {
             throw new LokiSignInRequired(`Invalid credential cache. ${signInHint}`);
           }
-          text = await readFile(path, "utf8");
+          if (info.size > 16 * 1024 * 1024) {
+            if (!replaceInvalid) throw new LokiSignInRequired(`Invalid credential cache. ${signInHint}`);
+          } else {
+            text = await readFile(path, "utf8");
+          }
         } catch (error) {
           if (errorCode(error) !== "ENOENT") throw error;
         }
