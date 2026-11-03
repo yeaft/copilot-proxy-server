@@ -5,6 +5,7 @@ import { after, before, test } from "node:test";
 import { serve } from "@hono/node-server";
 
 import { app } from "../src/server.js";
+import { LokiSignInRequired, LokiAuthError } from "../src/auth/loki-auth.js";
 import { state } from "../src/lib/state.js";
 import { LokiProvider } from "../src/services/loki.js";
 
@@ -150,4 +151,36 @@ test("invalid requests are rejected and health remains public", async () => {
     "content-type": "application/json" }, body: "not-json" });
   assert.equal(response.status, 400);
   assert.equal((await fetch(base)).status, 200);
+});
+
+test("missing Microsoft credentials return an actionable error without upstream requests", async () => {
+  const original = state.loki;
+  const count = requests.length;
+  state.loki = new LokiProvider({ tokens: { getToken: async () => { throw new LokiSignInRequired("Not signed in. Run npm run auth:loki."); } }, environment: "prod" });
+  try {
+    const response = await post("/v1/responses", { model: `loki/${nativeModel}` });
+    assert.equal(response.status, 401);
+    assert.match(await response.text(), /npm run auth:loki/);
+    assert.equal(requests.length, count);
+  } finally { state.loki = original; }
+});
+
+test("transient Microsoft refresh errors report 503, not invalid client authentication", async () => {
+  const original = state.loki;
+  state.loki = new LokiProvider({ tokens: { getToken: async () => { throw new LokiAuthError("Could not refresh the sign-in. Check the network connection."); } }, environment: "prod" });
+  try {
+    const response = await post("/v1/responses", { model: `loki/${nativeModel}` });
+    assert.equal(response.status, 503);
+    assert.match(await response.text(), /Check the network/);
+  } finally { state.loki = original; }
+});
+
+test("Loki keeps the proxy rate limit response", async () => {
+  const seconds = state.rateLimitSeconds;
+  const last = state.lastRequestTimestamp;
+  state.rateLimitSeconds = 60;
+  state.lastRequestTimestamp = Date.now();
+  try {
+    assert.equal((await post("/v1/responses", { model: `loki/${nativeModel}` })).status, 429);
+  } finally { state.rateLimitSeconds = seconds; state.lastRequestTimestamp = last; }
 });

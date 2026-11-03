@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { LokiAuthError } from "../auth/loki-errors.js";
 
 export interface LokiTokenSource {
   getToken(forceRefresh?: boolean): Promise<string>;
@@ -230,7 +231,7 @@ export class LokiProvider {
     } catch (error) {
       if (signal?.aborted) throw cancelled();
       // Discovery is an optimization for aliases, not a dependency of the native APIs.
-      if (error instanceof LokiUpstreamError && error.status === 401) throw error;
+      if (error instanceof LokiAuthError || (error instanceof LokiUpstreamError && error.status === 401)) throw error;
     }
     if (signal?.aborted) throw cancelled();
     let model = payload.model;
@@ -267,9 +268,11 @@ export class LokiProvider {
       let token: string;
       try {
         token = await withAbort(this.tokens.getToken(forceRefresh), signal);
-      } catch {
+      } catch (error) {
         if (signal?.aborted) throw cancelled();
-        throw new LokiUpstreamError(401, "Microsoft Loki authentication failed.");
+        // Authentication's public errors are already sanitized and contain actionable hints.
+        if (error instanceof LokiAuthError) throw error;
+        throw new LokiUpstreamError(401, "Microsoft Loki authentication failed. Run npm run auth:loki to sign in.");
       }
       if (signal?.aborted) throw cancelled();
       const response = await this.request(target, method, {

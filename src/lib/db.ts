@@ -1,4 +1,4 @@
-import initSqlJs, { type Database as SqlJsDatabase } from "sql.js/dist/sql-asm.js";
+import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from "sql.js/dist/sql-asm.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -223,7 +223,7 @@ function timezoneModifier(range: TimeRange): string {
   return `${-offset} minutes`;
 }
 
-function queryAll<T>(sql: string, params: unknown[] = []): T[] {
+function queryAll<T>(sql: string, params: SqlValue[] = []): T[] {
   const d = getDb();
   const stmt = d.prepare(sql);
   stmt.bind(params);
@@ -235,7 +235,7 @@ function queryAll<T>(sql: string, params: unknown[] = []): T[] {
   return results;
 }
 
-function queryOne<T>(sql: string, params: unknown[] = []): T {
+function queryOne<T>(sql: string, params: SqlValue[] = []): T {
   const d = getDb();
   const stmt = d.prepare(sql);
   stmt.bind(params);

@@ -2,8 +2,9 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm install
+COPY package.json package-lock.json ./
+# Windows WAM/keychain native extensions are optional and cannot run in Alpine.
+RUN npm ci --omit=optional
 
 COPY tsconfig.json tsup.config.ts ./
 COPY src/ src/
@@ -14,10 +15,9 @@ FROM node:22-alpine AS runner
 
 WORKDIR /app
 
-# better-sqlite3 is a native module and must be installed in the runner
-RUN apk add --no-cache python3 make g++
-COPY package.json package-lock.json* ./
-RUN npm install --omit=dev && apk del python3 make g++
+# MSAL core, proper-lockfile and sql.js are pure JS. No native compiler is needed.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --omit=optional
 
 COPY --from=builder /app/dist ./dist
 
