@@ -16,14 +16,17 @@
     "bench:full": "node scripts/bench-latency.mjs --rounds 5 --prompt-size medium --output bench-results.json"
   },
   "dependencies": {
+    "@azure/msal-node": "^7.1.2",
     "@hono/node-server": "^2.1.0",
     "eventsource-parser": "^3.0.0",
     "gpt-tokenizer": "^2.8.1",
     "hono": "^4.13.0",
+    "proper-lockfile": "^4.1.2",
     "sql.js": "^1.14.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.11",
+    "@types/proper-lockfile": "^4.1.4",
     "tsup": "^8.3.5",
     "tsx": "^4.23.7",
     "typescript": "^5.9.3"
@@ -33,5 +36,8 @@
   },
   "overrides": {
     "esbuild": "^0.28.1"
+  },
+  "optionalDependencies": {
+    "@azure/msal-node-extensions": "^5.5.4"
   }
 }
