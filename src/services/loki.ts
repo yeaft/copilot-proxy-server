@@ -4,7 +4,7 @@ import { request as httpsRequest } from "node:https";
 import { LokiAuthError } from "../auth/loki-errors.js";
 
 export interface LokiTokenSource {
-  getToken(forceRefresh?: boolean): Promise<string>;
+  getToken(forceRefresh?: boolean, rejectedToken?: string): Promise<string>;
 }
 
 export type LokiEnvironment = "prod" | "msit" | "sdf";
@@ -263,11 +263,12 @@ export class LokiProvider {
     body?: Buffer,
     signal?: AbortSignal,
   ): Promise<Response> {
+    let rejectedToken: string | undefined;
     for (const forceRefresh of [false, true]) {
       if (signal?.aborted) throw cancelled();
       let token: string;
       try {
-        token = await withAbort(this.tokens.getToken(forceRefresh), signal);
+        token = await withAbort(this.tokens.getToken(forceRefresh, rejectedToken), signal);
       } catch (error) {
         if (signal?.aborted) throw cancelled();
         // Authentication's public errors are already sanitized and contain actionable hints.
@@ -279,6 +280,7 @@ export class LokiProvider {
         ...headers, ...nativeHeaders(token), "accept-encoding": "identity",
       }, body, signal);
       if (response.status !== 401 || forceRefresh) return response;
+      rejectedToken = token;
       // Dispose even an unbounded rejection body before acquiring a new MS token.
       await response.body?.cancel();
     }

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { PublicClientApplication } from "@azure/msal-node";
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -10,6 +12,7 @@ import type { AccountInfo, AuthenticationResult } from "@azure/msal-node";
 import { LokiAuthentication, LokiAuthError, LokiSignInRequired, type AccessToken } from "../src/auth/loki-auth.js";
 import { atomicWrite, privateDirectory, withLock } from "../src/auth/loki-storage.js";
 import { browserSignIn, openBrowser } from "../src/auth/loki-browser.js";
+import { LokiProvider } from "../src/services/loki.js";
 
 const scopes = ["42c8f7bd-c7a8-4ba9-bc1c-91edfb716247/.default"];
 const account: AccountInfo = {
@@ -58,6 +61,29 @@ function mockBroker(overrides: object = {}): PublicClientApplication {
     acquireTokenSilent: async () => ({ ...result, accessToken: "mock-refreshed-token" }),
     ...overrides,
   } as unknown as PublicClientApplication;
+}
+
+async function offlineBrokerLogin(directory: string, token: string): Promise<void> {
+  const moduleUrl = new URL("../src/auth/loki-auth.ts", import.meta.url).href;
+  const code = `
+    import { LokiAuthentication } from ${JSON.stringify(moduleUrl)};
+    class OfflineCli extends LokiAuthentication {
+      async brokerClient() { return { acquireTokenInteractive: async () => ({
+        fromPlatformBroker: true, accessToken: ${JSON.stringify(token)},
+        account: ${JSON.stringify(account)}, expiresOn: new Date(Date.now() + 3600000),
+      }) }; }
+    }
+    await new OfflineCli(${JSON.stringify(directory)}).signIn(false, () => {});
+  `;
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), stdio: ["ignore", "ignore", "pipe"],
+    });
+    let diagnostics = "";
+    child.stderr.on("data", (chunk) => { diagnostics += chunk; });
+    child.once("error", reject);
+    child.once("exit", (status) => status === 0 ? resolve() : reject(new Error(diagnostics)));
+  });
 }
 
 test("missing credentials require explicit sign-in without contacting Microsoft", async () => temporary(async (directory) => {
@@ -549,36 +575,14 @@ test("a running rejected broker session recovers only after independent successf
   await assert.rejects(service.signIn(false, () => {}), /returned the rejected token/);
   assert.equal(await readFile(path, "utf8"), unchanged);
 
-  const moduleUrl = new URL("../src/auth/loki-auth.ts", import.meta.url).href;
-  const login = async (token: string) => {
-    const code = `
-      import { LokiAuthentication } from ${JSON.stringify(moduleUrl)};
-      class OfflineCli extends LokiAuthentication {
-        async brokerClient() { return { acquireTokenInteractive: async () => ({
-          fromPlatformBroker: true, accessToken: ${JSON.stringify(token)},
-          account: ${JSON.stringify(account)}, expiresOn: new Date(Date.now() + 3600000),
-        }) }; }
-      }
-      await new OfflineCli(${JSON.stringify(directory)}).signIn(false, () => {});
-    `;
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
-        cwd: fileURLToPath(new URL("..", import.meta.url)), stdio: ["ignore", "ignore", "pipe"],
-      });
-      let diagnostics = "";
-      child.stderr.on("data", (chunk) => { diagnostics += chunk; });
-      child.once("error", reject);
-      child.once("exit", (status) => status === 0 ? resolve() : reject(new Error(diagnostics)));
-    });
-  };
-  await login(result.accessToken);
+  await offlineBrokerLogin(directory, result.accessToken);
   const firstLogin = JSON.parse(await readFile(path, "utf8"));
   assert.notEqual(firstLogin.generation, stored.generation);
   await assert.rejects(service.getToken(), /returned the rejected token/);
   await assert.rejects(service.getToken(true), /returned the rejected token/);
   assert.equal(silentCalls, 2, "new login permits isolated acquisition, never accepting the rejected token");
   silentToken = "independently-renewed-token";
-  await login(silentToken);
+  await offlineBrokerLogin(directory, silentToken);
   assert.notEqual(JSON.parse(await readFile(path, "utf8")).generation, firstLogin.generation);
   assert.deepEqual(await Promise.all(Array.from({ length: 5 }, () => service.getToken())), Array(5).fill(silentToken));
   assert.equal(silentCalls, 3, "running service recovers without restart and shares one acquisition");
@@ -601,4 +605,118 @@ test("ordinary successful silent-refresh writes preserve explicit login generati
   const after = JSON.parse(await readFile(path, "utf8"));
   assert.notEqual(after.cache, before.cache);
   assert.equal(after.generation, before.generation);
+}));
+
+function gate<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const normalCompletesFirst of [true, false]) {
+  test(`401 quarantines the actual request token when normal refresh completes ${normalCompletesFirst ? "before" : "after"} rejection`, { timeout: 20_000 }, async (context) => temporary(async (directory) => {
+    const requestReceived = gate<ServerResponse>();
+    const brokerEntered = gate<void>();
+    const releaseBroker = gate<void>();
+    const rejectionRecorded = gate<void>();
+    let reportedRejection: string | undefined;
+    let silentToken = "race-T2";
+    let blockBroker = true;
+    const broker = mockBroker({
+      acquireTokenInteractive: async () => ({ ...result, accessToken: "race-T1" }),
+      acquireTokenSilent: async () => {
+        if (blockBroker) {
+          brokerEntered.resolve();
+          await releaseBroker.promise;
+        }
+        return { ...result, accessToken: silentToken, expiresOn: new Date(Date.now() + 3_600_000) };
+      },
+    });
+    const service = new MockAuthentication(directory, broker);
+    await service.signIn(false, () => {});
+    const server = createServer((request, response) => {
+      assert.equal(request.headers.authorization, "Bearer race-T1");
+      requestReceived.resolve(response);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    context.after(() => new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    }));
+    const provider = new LokiProvider({
+      environment: "prod", baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/`,
+      tokens: { getToken: (forced, rejected) => {
+        const pending = service.getToken(forced, rejected);
+        if (forced) {
+          reportedRejection = rejected;
+          rejectionRecorded.resolve();
+        }
+        return pending;
+      } },
+    });
+    const rejectedRequest = assert.rejects(provider.getModels(), /cannot guarantee a forced token refresh/);
+    const response = await requestReceived.promise;
+    let now = Date.now() + 3_600_000;
+    context.mock.method(Date, "now", () => now);
+    const normal = service.getToken();
+    await brokerEntered.promise;
+    if (normalCompletesFirst) {
+      releaseBroker.resolve();
+      assert.equal(await normal, "race-T2");
+    }
+    response.writeHead(401).end();
+    await rejectionRecorded.promise;
+    if (!normalCompletesFirst) {
+      releaseBroker.resolve();
+      assert.equal(await normal, "race-T2");
+    }
+    await rejectedRequest;
+    assert.equal(reportedRejection, "race-T1", "provider must pass the token used by the 401 request");
+    await assert.rejects(service.getToken(), /cannot guarantee a forced token refresh/, "in-flight normal refresh must not clear rejection");
+    blockBroker = false;
+    const path = join(directory, "auth", "cache.json");
+    const oldGeneration = JSON.parse(await readFile(path, "utf8")).generation;
+    await offlineBrokerLogin(directory, "race-T1");
+    assert.notEqual(JSON.parse(await readFile(path, "utf8")).generation, oldGeneration);
+    silentToken = "race-T1";
+    await assert.rejects(service.getToken(), /returned the rejected token/, "independent login must not release the actual rejected hash");
+    // T2 was not the rejected request token and must not be accidentally quarantined.
+    silentToken = "race-T2";
+    assert.equal(await service.getToken(), "race-T2");
+    await offlineBrokerLogin(directory, "race-T3");
+    now += 3_600_000;
+    silentToken = "race-T1";
+    await assert.rejects(service.getToken(), /returned the rejected token/, "a successful recovery must retain older rejected hashes");
+    silentToken = "race-T3";
+    assert.equal(await service.getToken(), "race-T3");
+  }));
+}
+
+test("concurrent 401s retain different rejected broker hashes while sharing the forced refresh", async () => temporary(async (directory) => {
+  let silentToken = "concurrent-T3";
+  const service = new MockAuthentication(directory, mockBroker({
+    acquireTokenInteractive: async () => ({ ...result, accessToken: silentToken }),
+    acquireTokenSilent: async () => ({ ...result, accessToken: silentToken }),
+  }));
+  await service.signIn(false, () => {});
+  await Promise.all([
+    assert.rejects(service.getToken(true, "concurrent-T1"), LokiSignInRequired),
+    assert.rejects(service.getToken(true, "concurrent-T2"), LokiSignInRequired),
+  ]);
+  await offlineBrokerLogin(directory, "concurrent-T3");
+  for (silentToken of ["concurrent-T1", "concurrent-T2"]) {
+    await assert.rejects(service.getToken(), /returned the rejected token/);
+    await assert.rejects(service.signIn(false, () => {}), LokiSignInRequired);
+  }
+  silentToken = "concurrent-T3";
+  assert.equal(await service.getToken(), silentToken);
+}));
+
+test("bounded broker rejection tracking fails closed rather than evicting older hashes", async () => temporary(async (directory) => {
+  const service = new MockAuthentication(directory, mockBroker());
+  await service.signIn(false, () => {});
+  await Promise.all(Array.from({ length: 65 }, (_, index) =>
+    assert.rejects(service.getToken(true, `rejected-${index}`), LokiSignInRequired)));
+  await offlineBrokerLogin(directory, "fresh-offline-token");
+  await assert.rejects(service.getToken(), /returned the rejected token/);
 }));

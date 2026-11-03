@@ -38,7 +38,7 @@ function requiresInteraction(error: unknown): boolean {
 }
 
 export interface TokenSource {
-  getToken(forceRefresh?: boolean): Promise<string>;
+  getToken(forceRefresh?: boolean, rejectedToken?: string): Promise<string>;
 }
 
 export interface AccessToken {
@@ -58,7 +58,9 @@ export class LokiAuthentication implements TokenSource {
   private readonly directory: string;
   private prepared: Promise<void> | undefined;
   private current: AccessToken | undefined;
-  private brokerRejected: { generation: string | undefined; hash: string | undefined } | undefined;
+  private brokerRejected: { generation: string | undefined } | undefined;
+  private readonly rejectedBrokerHashes = new Set<string>();
+  private brokerRejectionsExhausted = false;
   private brokerToken: BrokerToken | undefined;
   private pending: PendingRefresh | undefined;
   private nativeClient: Promise<PublicClientApplication | undefined> | undefined;
@@ -170,8 +172,18 @@ export class LokiAuthentication implements TokenSource {
     }));
   }
 
-  async getToken(forceRefresh = false): Promise<string> {
-    if (forceRefresh) this.current = undefined;
+  async getToken(forceRefresh = false, rejectedToken?: string): Promise<string> {
+    if (forceRefresh) {
+      this.current = undefined;
+      if (this.brokerToken || rejectedToken !== undefined) {
+        // Record the actual 401 token before waiting for an in-flight refresh,
+        // which may already have replaced brokerToken with a different token.
+        const hash = rejectedToken === undefined ? this.brokerToken!.hash : tokenHash(rejectedToken);
+        if (this.brokerToken) this.brokerRejected = { generation: this.brokerToken.generation };
+        if (this.rejectedBrokerHashes.size < 64) this.rejectedBrokerHashes.add(hash);
+        else if (!this.rejectedBrokerHashes.has(hash)) this.brokerRejectionsExhausted = true;
+      }
+    }
     if (this.pending) {
       if (!forceRefresh || this.pending.forced) return this.pending.promise;
       // A 401 must not join an unforced refresh, but concurrent 401s share ONE
@@ -202,12 +214,10 @@ export class LokiAuthentication implements TokenSource {
   }
 
   protected async acquire(forceRefresh: boolean): Promise<AccessToken> {
-    // Remember rejection even if reading the shared cache fails. A later cache
-    // repair must not make this instance reuse the token that received a 401.
-    if (forceRefresh && this.brokerToken && !this.brokerRejected) this.brokerRejected = { ...this.brokerToken };
+    const rejection = this.brokerRejected;
     const token = await this.cached(async (accountId, brokerAccount, generation) => {
       if (brokerAccount && forceRefresh && !this.brokerRejected) {
-        this.brokerRejected = { generation, hash: undefined };
+        this.brokerRejected = { generation };
       }
       // Only a successful explicit login rotates this marker. Cache writes from
       // silent refreshes, old caches, or failed sign-ins cannot release quarantine.
@@ -237,13 +247,16 @@ export class LokiAuthentication implements TokenSource {
         throw new LokiAuthError(`Could not refresh the sign-in (${authErrorDetail(error)}). Check the network connection. ${signInHint}`);
       }
     });
-    // Do not release quarantine if the cache lock/write failed after acquisition.
-    this.brokerRejected = undefined;
+    // A normal acquisition already in flight cannot release a newer rejection.
+    // Keep hashes across login generations, even after a different token recovers.
+    this.acceptToken(token);
+    if (this.brokerRejected === rejection) this.brokerRejected = undefined;
     return token;
   }
 
   private acceptToken(token: AccessToken): AccessToken {
-    if (this.brokerRejected?.hash === tokenHash(token.value)) {
+    // Bound memory without ever evicting an old rejection: fail closed on overflow.
+    if (this.brokerRejectionsExhausted || this.rejectedBrokerHashes.has(tokenHash(token.value))) {
       throw new LokiSignInRequired(`The Windows broker returned the rejected token; sign in again. ${signInHint}`);
     }
     return token;
@@ -284,7 +297,7 @@ export class LokiAuthentication implements TokenSource {
         granted = await this.interactive(scopes, deviceCode, notify);
       }
       if (!granted.account || !granted.accessToken) throw new LokiAuthError("Sign-in did not return an account and access token.");
-      if (this.brokerRejected?.hash === tokenHash(granted.accessToken)) {
+      if (this.brokerRejectionsExhausted || this.rejectedBrokerHashes.has(tokenHash(granted.accessToken))) {
         throw new LokiSignInRequired(`Sign-in returned the rejected token; sign in again. ${signInHint}`);
       }
       const account = granted.account;
