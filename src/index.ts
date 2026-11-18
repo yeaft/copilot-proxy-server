@@ -93,8 +93,8 @@ async function main() {
   logger.info("Endpoints:");
   logger.info(`  OpenAI:     POST http://localhost:${config.port}/v1/chat/completions`);
   logger.info(`  Anthropic:  POST http://localhost:${config.port}/v1/messages`);
-  logger.info(`  Gemini:     POST http://localhost:${config.port}/v1beta/models/{model}:generateContent`);
-  logger.info(`  Gemini SSE: POST http://localhost:${config.port}/v1beta/models/{model}:streamGenerateContent`);
+  logger.info(`  Gemini:     POST http://localhost:${config.port}/v1/models/{model}:generateContent`);
+  logger.info(`  Gemini SSE: POST http://localhost:${config.port}/v1/models/{model}:streamGenerateContent`);
   logger.info(`  Models:     GET  http://localhost:${config.port}/v1/models`);
   logger.info(`  Health:     GET  http://localhost:${config.port}/`);
   logger.info(`  Dashboard:  GET  http://localhost:${config.port}/dashboard`);

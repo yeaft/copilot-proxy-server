@@ -24,6 +24,7 @@ const BLOCKED_HEADERS = new Set([
   "content-length",
   "authorization",
   "x-api-key",
+  "x-goog-api-key",
   "cookie",
   "set-cookie",
   "origin",
