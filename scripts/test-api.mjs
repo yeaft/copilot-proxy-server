@@ -241,7 +241,7 @@ async function testAnthropicStream(model) {
 async function testGemini(model) {
   const start = performance.now();
   try {
-    const res = await fetch(`${BASE_URL}/v1beta/models/${model}:generateContent`, {
+    const res = await fetch(`${BASE_URL}/v1/models/${model}:generateContent`, {
       method: "POST",
       headers: headers(),
       body: JSON.stringify({
@@ -280,7 +280,7 @@ async function testCountTokens() {
 
   // Gemini format
   const start2 = performance.now();
-  const res2 = await fetch(`${BASE_URL}/v1beta/models/gpt-4o:countTokens`, {
+  const res2 = await fetch(`${BASE_URL}/v1/models/gpt-4o:countTokens`, {
     method: "POST",
     headers: headers(),
     body: JSON.stringify({

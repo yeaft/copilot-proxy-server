@@ -12,7 +12,7 @@ into this server (no separate Loki service). Copilot remains the default. See
 
 ## Features
 
-- **Multi-format API support** — Chat Completions (`/v1/chat/completions`), Messages (`/v1/messages`), and Gemini-style (`/v1beta/models/`) endpoints
+- **Multi-format API support** — Chat Completions (`/v1/chat/completions`), Messages (`/v1/messages`), and Gemini-style (`/v1/models/{model}:...`) endpoints
 - **Automatic format translation** — Messages and Gemini-style requests are transparently converted to the Copilot wire format
 - **Streaming support** — Full SSE streaming for all API formats
 - **Token management** — Automatic Copilot token refresh, no manual intervention needed
@@ -128,6 +128,9 @@ curl -H "Authorization: Bearer YOUR_API_KEY" ...
 
 # Via x-api-key header
 curl -H "x-api-key: YOUR_API_KEY" ...
+
+# Via Google SDK-style header (Gemini REST methods only)
+curl -H "x-goog-api-key: YOUR_API_KEY" ...
 ```
 
 If `API_KEY` is not set, no client authentication is required (suitable for local or internal network use).
@@ -261,17 +264,17 @@ Estimate the token count for a Messages-style request.
 ### Gemini-style generateContent
 
 ```
-POST /v1beta/models/{model}:generateContent
+POST /v1/models/{model}:generateContent
 ```
 
-Gemini-style content generation endpoint (non-streaming).
+Gemini-style content generation endpoint (non-streaming). Use the stable `/v1` API for new integrations; `/v1beta` remains available for all three Gemini methods as a compatibility alias. Use a model available to your Copilot account (see `GET /v1/models`). The proxy translates these requests to Copilot Chat Completions; it does not forward to Google's Gemini API. Google-only features (such as Search grounding and Files/Live APIs) are not supported.
 
 **Example:**
 
 ```bash
-curl -X POST http://localhost:6628/v1beta/models/gemini-2.0-flash:generateContent \
+curl -X POST http://localhost:6628/v1/models/gemini-4-carbon:generateContent \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "x-goog-api-key: YOUR_API_KEY" \
   -d '{
     "contents": [
       {
@@ -286,14 +289,33 @@ curl -X POST http://localhost:6628/v1beta/models/gemini-2.0-flash:generateConten
   }'
 ```
 
-**Supported parameters:** `contents`, `systemInstruction`, `generationConfig` (`temperature`, `topP`, `topK`, `maxOutputTokens`, `stopSequences`), `tools` (function calling), `toolConfig`
+**Translated parameters:** `contents`, `systemInstruction`, `generationConfig` (`temperature`, `topP`, `maxOutputTokens`, `stopSequences`, `candidateCount`), function declarations, and basic function calling modes. The upstream model may limit some of these parameters.
+
+**Google Gen AI JavaScript SDK (`@google/genai`):**
+
+```js
+import { GoogleGenAI } from "@google/genai";
+
+const client = new GoogleGenAI({
+  apiKey: process.env.PROXY_API_KEY, // Your proxy's API_KEY, not a Google key.
+  apiVersion: "v1",
+  httpOptions: { baseUrl: "http://localhost:6628" },
+});
+const result = await client.models.generateContent({
+  model: "gemini-4-carbon",
+  contents: "Hello!",
+});
+console.log(result.text);
+```
+
+Set `baseUrl` to the proxy URL without appending `/v1`. SDK versions that already default to stable `v1` can omit `apiVersion`. For model discovery, `GET /v1/models` returns the OpenAI-style catalog; the Gemini model-list API is not implemented.
 
 ---
 
 ### Gemini-style streamGenerateContent
 
 ```
-POST /v1beta/models/{model}:streamGenerateContent
+POST /v1/models/{model}:streamGenerateContent?alt=sse
 ```
 
 Streaming version of generateContent, returns SSE format.
@@ -303,10 +325,10 @@ Streaming version of generateContent, returns SSE format.
 ### Gemini-style countTokens
 
 ```
-POST /v1beta/models/{model}:countTokens
+POST /v1/models/{model}:countTokens
 ```
 
-Estimate token count for a Gemini-style request.
+Estimate token count locally for a Gemini-style request. This is not Google’s tokenizer result.
 
 ---
 
@@ -389,7 +411,7 @@ print(message.content[0].text)
 ### Gemini-style (curl)
 
 ```bash
-curl -X POST http://localhost:6628/v1beta/models/gemini-2.0-flash:generateContent \
+curl -X POST http://localhost:6628/v1/models/gemini-4-carbon:generateContent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{

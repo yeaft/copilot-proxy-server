@@ -24,9 +24,9 @@ import {
 
 export const geminiRoutes = new Hono();
 
-// POST /v1beta/models/{model}:generateContent
+// POST /models/{model}:generateContent (mounted under /v1 and /v1beta)
 geminiRoutes.post(
-  "/v1beta/models/:modelWithMethod{.+\\:generateContent}",
+  "/:modelWithMethod{.+\\:generateContent}",
   async (c) => {
     try {
       await checkRateLimit(state);
@@ -85,9 +85,9 @@ geminiRoutes.post(
   }
 );
 
-// POST /v1beta/models/{model}:streamGenerateContent
+// POST /models/{model}:streamGenerateContent
 geminiRoutes.post(
-  "/v1beta/models/:modelWithMethod{.+\\:streamGenerateContent}",
+  "/:modelWithMethod{.+\\:streamGenerateContent}",
   async (c) => {
     try {
       await checkRateLimit(state);
@@ -172,9 +172,9 @@ geminiRoutes.post(
   }
 );
 
-// POST /v1beta/models/{model}:countTokens
+// POST /models/{model}:countTokens
 geminiRoutes.post(
-  "/v1beta/models/:modelWithMethod{.+\\:countTokens}",
+  "/:modelWithMethod{.+\\:countTokens}",
   async (c) => {
     try {
       const { modelWithMethod } = c.req.param();

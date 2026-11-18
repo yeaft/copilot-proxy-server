@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger as honoLogger } from "hono/logger";
+import { matchedRoutes } from "hono/route";
 
 import { state } from "./lib/state.js";
 import { HTTPError, forwardError } from "./lib/error.js";
@@ -16,6 +17,7 @@ import { responsesRoutes } from "./routes/responses/route.js";
 import { playgroundRoutes } from "./routes/playground/route.js";
 
 export const app = new Hono();
+const geminiMounts = new Set(["/v1/models", "/v1beta/models"]);
 
 app.use(honoLogger());
 app.use(cors());
@@ -44,19 +46,17 @@ app.use("*", async (c, next) => {
     return next();
   }
 
-  // Extract key from Authorization header (Bearer xxx) or x-api-key header
+  // Use the router's matches so SDK credentials work on exactly the mounted Gemini POST routes.
+  const isGeminiMethod = c.req.method === "POST" &&
+    matchedRoutes(c).some(({ basePath, method }) => method === "POST" && geminiMounts.has(basePath));
   const authHeader = c.req.header("Authorization");
-  const xApiKey = c.req.header("x-api-key");
-
-  let providedKey: string | undefined;
-  if (authHeader?.startsWith("Bearer ")) {
-    providedKey = authHeader.slice(7);
-  } else if (xApiKey) {
-    providedKey = xApiKey;
-  }
+  const providedKey = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : c.req.header("x-api-key") || (isGeminiMethod ? c.req.header("x-goog-api-key") : undefined);
 
   if (!providedKey) {
-    return c.json({ error: "Missing API key. Provide via Authorization: Bearer <key> or x-api-key header." }, 401);
+    const headers = isGeminiMethod ? "x-api-key or x-goog-api-key" : "x-api-key";
+    return c.json({ error: `Missing API key. Provide via Authorization: Bearer <key> or ${headers} header.` }, 401);
   }
 
   // Constant-time comparison to prevent timing attacks
@@ -117,8 +117,10 @@ app.route("/responses", responsesRoutes);
 // Anthropic-compatible endpoints
 app.route("/v1/messages", messageRoutes);
 
-// Gemini-compatible endpoints
-app.route("/", geminiRoutes);
+// Gemini-compatible endpoints (stable v1 and legacy v1beta)
+for (const mount of geminiMounts) {
+  app.route(mount, geminiRoutes);
+}
 
 // Dashboard (protected by a persistent cookie session)
 app.route("/dashboard", dashboardRoutes);
