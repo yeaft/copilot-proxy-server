@@ -18,7 +18,7 @@ Run on any server (including headless machines without GUI) via Docker — no VS
 
 ## Prerequisites
 
-- **Node.js** >= 22
+- **Node.js** >= 22.5.0
 - A **GitHub account** with an active **GitHub Copilot** subscription
 
 ## Quick Start

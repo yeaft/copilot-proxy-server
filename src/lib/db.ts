@@ -49,8 +49,12 @@ export async function initDatabase(dataDir: string): Promise<void> {
   // Enable WAL mode for fast incremental appends without blocking readers or serializing the whole DB.
   db.exec("PRAGMA busy_timeout = 5000");
   try {
-    db.exec("PRAGMA journal_mode = WAL");
-    db.exec("PRAGMA synchronous = NORMAL");
+    const modeRow = db.prepare("PRAGMA journal_mode = WAL").get() as { journal_mode?: string } | undefined;
+    if (modeRow?.journal_mode?.toLowerCase() === "wal") {
+      db.exec("PRAGMA synchronous = NORMAL");
+    } else {
+      logger.warn(`SQLite WAL mode unavailable (active mode: ${modeRow?.journal_mode ?? "unknown"}); using default synchronous mode.`);
+    }
   } catch (err) {
     logger.warn("Could not enable SQLite WAL mode, falling back to default journal mode:", err);
   }
