@@ -163,7 +163,7 @@ POST /v1/chat/completions
 POST /chat/completions
 ```
 
-Standard Chat Completions endpoint. Requests are forwarded directly to the Copilot backend.
+Standard Chat Completions endpoint (latest OpenAI spec). Models that Copilot serves on `/chat/completions` (Gemini, GPT-4.x, …) are forwarded as-is. Models that Copilot serves only on `/responses` (GPT-5.x/6.x, Codex, Grok, MAI-1.1) are bridged transparently, so clients keep using the Chat Completions contract for every model.
 
 **Example (non-streaming):**
 
@@ -194,7 +194,17 @@ curl -X POST http://localhost:6628/v1/chat/completions \
   }'
 ```
 
-**Supported parameters:** `model`, `messages`, `temperature`, `top_p`, `max_tokens`, `stop`, `stream`, `tools`, `tool_choice`, `response_format`, `seed`, `n`, `frequency_penalty`, `presence_penalty`
+**Supported parameters:** `model`, `messages` (`system`/`developer`/`user`/`assistant`/`tool`; text, `image_url`, `file` parts), `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `stop`, `stream`, `stream_options.include_usage`, `tools` (`function` and `custom`), `tool_choice` (incl. named and `allowed_tools`), `parallel_tool_calls`, `response_format` (`text`/`json_object`/`json_schema`), `reasoning_effort` (`none` … `max`), `verbosity`, `logprobs`, `top_logprobs`, `prompt_cache_key`, `prompt_cache_options`, `prompt_cache_retention`, `safety_identifier`, `metadata`, `user`, `seed`, `n`, `frequency_penalty`, `presence_penalty`
+
+#### Responses-only models (GPT-5.x/6.x, Codex, Grok, MAI-1.1)
+
+These are bridged to Copilot's `/responses` endpoint and back:
+
+- **Tool calling** — function and custom (grammar) tools, parallel calls, tool results, and `finish_reason: "tool_calls"`, streamed with the standard `index`/`id`/`arguments` deltas.
+- **Reasoning** — the reasoning summary is returned as `reasoning_text`. The reasoning state is returned as `reasoning_opaque` (Copilot's Chat Completions extension, the same fields Gemini uses). Echo `reasoning_opaque` back on the assistant message so the model keeps its reasoning across tool-calling turns. Values from other models are ignored, so switching models mid-conversation is safe.
+- **Finish reasons and usage** — truncation returns `finish_reason: "length"` and content filtering returns `"content_filter"`. Usage includes `cached_tokens`, `cache_write_tokens` and `reasoning_tokens`. With `stream_options.include_usage`, usage arrives in a final chunk with empty `choices`. Without it, usage is attached to the finish chunk. Streams end with `data: [DONE]`. A stream that fails upstream ends with an `{"error": …}` chunk instead.
+- **Rejected with HTTP 400** (the Responses API cannot honour them): `n` > 1, audio input/output, `web_search_options`, `moderation`, and the deprecated `functions`/`function_call`.
+- **Ignored** (no Responses equivalent; best-effort hints): `stop`, `seed`, `logit_bias`, `frequency_penalty`, `presence_penalty`, `prediction`, `service_tier`, `store`.
 
 ---
 

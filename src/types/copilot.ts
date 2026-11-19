@@ -41,4 +41,8 @@ interface ModelSupports {
   tool_calls?: boolean;
   parallel_tool_calls?: boolean;
   dimensions?: boolean;
+  vision?: boolean;
+  streaming?: boolean;
+  structured_outputs?: boolean;
+  reasoning_effort?: Array<string>;
 }

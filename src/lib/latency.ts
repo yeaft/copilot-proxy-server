@@ -5,11 +5,14 @@ export function hasChatOutput(chunk: ChatCompletionChunk): boolean {
   return chunk.choices.some((choice) => {
     const { delta } = choice;
     if (typeof delta.content === "string" && delta.content.length > 0) return true;
+    if (typeof delta.refusal === "string" && delta.refusal.length > 0) return true;
     return delta.tool_calls?.some((toolCall) =>
       Boolean(
         toolCall.id ||
         toolCall.function?.name ||
-        toolCall.function?.arguments
+        toolCall.function?.arguments ||
+        toolCall.custom?.name ||
+        toolCall.custom?.input
       )
     ) ?? false;
   });
@@ -19,7 +22,9 @@ export function hasChatOutput(chunk: ChatCompletionChunk): boolean {
 export function hasResponsesOutput(event: string, delta: unknown): boolean {
   return (
     (event === "response.output_text.delta" ||
-      event === "response.function_call_arguments.delta") &&
+      event === "response.refusal.delta" ||
+      event === "response.function_call_arguments.delta" ||
+      event === "response.custom_tool_call_input.delta") &&
     typeof delta === "string" &&
     delta.length > 0
   );
