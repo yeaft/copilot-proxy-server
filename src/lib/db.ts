@@ -1,5 +1,4 @@
-import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from "sql.js/dist/sql-asm.js";
-import fs from "node:fs";
+import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import path from "node:path";
 
 import { logger } from "./logger.js";
@@ -8,54 +7,55 @@ import { calculateUsageCost } from "./pricing.js";
 export interface UsageRecord {
   ip: string;
   model: string;
-  endpoint: string; // 'openai' | 'anthropic' | 'gemini'
+  endpoint: string; // 'openai' | 'anthropic' | 'gemini' | 'responses'
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
   cached_prompt_tokens?: number;
   cache_write_prompt_tokens?: number;
-  /** Missing on legacy callers means known; native responses without usage set false. */
-  usage_known?: boolean;
   stream: boolean;
   duration_ms: number;
   ttfb_ms: number; // Time to first output token (legacy column name; 0 when unavailable)
 }
 
-let db: SqlJsDatabase | null = null;
+let db: DatabaseSync | null = null;
 let dbPath: string = "";
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let insertStmt: StatementSync | null = null;
+let signalsRegistered = false;
 
-function saveDb(): void {
+export function closeDatabase(): void {
+  insertStmt = null;
   if (!db) return;
+  const current = db;
+  db = null;
   try {
-    const data = db.export();
-    fs.writeFileSync(dbPath, Buffer.from(data));
-  } catch (err) {
-    logger.error("Failed to save database:", err);
+    current.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  } catch {
+    // Best-effort checkpoint; may fail on read-only or non-WAL databases.
   }
-}
-
-function scheduleSave(): void {
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    saveDb();
-  }, 1000);
+  try {
+    current.close();
+  } catch (err) {
+    logger.error("Failed to close database:", err);
+  }
 }
 
 export async function initDatabase(dataDir: string): Promise<void> {
-  const SQL = await initSqlJs();
+  closeDatabase();
 
   dbPath = path.join(dataDir, "usage.db");
+  db = new DatabaseSync(dbPath);
 
-  if (fs.existsSync(dbPath)) {
-    const fileBuffer = fs.readFileSync(dbPath);
-    db = new SQL.Database(fileBuffer);
-  } else {
-    db = new SQL.Database();
+  // Enable WAL mode for fast incremental appends without blocking readers or serializing the whole DB.
+  db.exec("PRAGMA busy_timeout = 5000");
+  try {
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA synchronous = NORMAL");
+  } catch (err) {
+    logger.warn("Could not enable SQLite WAL mode, falling back to default journal mode:", err);
   }
 
-  db.run(`
+  db.exec(`
     CREATE TABLE IF NOT EXISTS usage_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       timestamp TEXT NOT NULL DEFAULT (datetime('now')),
@@ -67,7 +67,6 @@ export async function initDatabase(dataDir: string): Promise<void> {
       total_tokens INTEGER NOT NULL DEFAULT 0,
       cached_prompt_tokens INTEGER NOT NULL DEFAULT 0,
       cache_write_prompt_tokens INTEGER NOT NULL DEFAULT 0,
-      usage_known INTEGER NOT NULL DEFAULT 1,
       stream INTEGER NOT NULL DEFAULT 0,
       duration_ms INTEGER NOT NULL DEFAULT 0,
       ttfb_ms INTEGER NOT NULL DEFAULT 0
@@ -80,23 +79,35 @@ export async function initDatabase(dataDir: string): Promise<void> {
 
   // Additive migrations keep existing usage databases compatible.
   for (const column of [
-    "usage_known INTEGER NOT NULL DEFAULT 1",
     "ttfb_ms INTEGER NOT NULL DEFAULT 0",
     "cached_prompt_tokens INTEGER NOT NULL DEFAULT 0",
     "cache_write_prompt_tokens INTEGER NOT NULL DEFAULT 0",
   ]) {
     try {
-      db.run(`ALTER TABLE usage_logs ADD COLUMN ${column}`);
+      db.exec(`ALTER TABLE usage_logs ADD COLUMN ${column}`);
     } catch {
       // Column already exists.
     }
   }
 
-  saveDb();
+  insertStmt = db.prepare(`
+    INSERT INTO usage_logs (
+      ip, model, endpoint, prompt_tokens, completion_tokens, total_tokens,
+      cached_prompt_tokens, cache_write_prompt_tokens, stream, duration_ms, ttfb_ms
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
 
-  // Flush database to disk on process exit
-  process.on("SIGTERM", () => saveDb());
-  process.on("SIGINT", () => saveDb());
+  if (!signalsRegistered) {
+    signalsRegistered = true;
+    process.once("SIGTERM", () => {
+      closeDatabase();
+      process.exit(0);
+    });
+    process.once("SIGINT", () => {
+      closeDatabase();
+      process.exit(0);
+    });
+  }
 
   logger.info(`Usage database initialized at ${dbPath}`);
 }
@@ -105,37 +116,30 @@ export async function initDatabase(dataDir: string): Promise<void> {
  * Asynchronously log usage record — never blocks the API response.
  */
 export function logUsage(record: UsageRecord): void {
-  if (!db) return;
+  if (!db || !insertStmt) return;
   setImmediate(() => {
+    if (!db || !insertStmt) return;
     try {
-      db!.run(
-        `INSERT INTO usage_logs (
-          ip, model, endpoint, prompt_tokens, completion_tokens, total_tokens,
-          cached_prompt_tokens, cache_write_prompt_tokens, stream, duration_ms, ttfb_ms, usage_known
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          record.ip,
-          record.model,
-          record.endpoint,
-          record.prompt_tokens,
-          record.completion_tokens,
-          record.total_tokens,
-          record.cached_prompt_tokens ?? 0,
-          record.cache_write_prompt_tokens ?? 0,
-          record.stream ? 1 : 0,
-          record.duration_ms,
-          record.ttfb_ms,
-          record.usage_known === false ? 0 : 1,
-        ]
+      insertStmt.run(
+        record.ip,
+        record.model,
+        record.endpoint,
+        record.prompt_tokens,
+        record.completion_tokens,
+        record.total_tokens,
+        record.cached_prompt_tokens ?? 0,
+        record.cache_write_prompt_tokens ?? 0,
+        record.stream ? 1 : 0,
+        record.duration_ms,
+        record.ttfb_ms
       );
-      scheduleSave();
     } catch (err) {
       logger.error("Failed to log usage:", err);
     }
   });
 }
 
-export function getDb(): SqlJsDatabase {
+export function getDb(): DatabaseSync {
   if (!db) throw new Error("Database not initialized");
   return db;
 }
@@ -223,31 +227,21 @@ function timezoneModifier(range: TimeRange): string {
   return `${-offset} minutes`;
 }
 
-function queryAll<T>(sql: string, params: SqlValue[] = []): T[] {
+function queryAll<T>(sql: string, params: SQLInputValue[] = []): T[] {
   const d = getDb();
   const stmt = d.prepare(sql);
-  stmt.bind(params);
-  const results: T[] = [];
-  while (stmt.step()) {
-    results.push(stmt.getAsObject() as T);
-  }
-  stmt.free();
-  return results;
+  return (stmt.all(...params) as Array<Record<string, unknown>>).map((row) => ({ ...row }) as T);
 }
 
-function queryOne<T>(sql: string, params: SqlValue[] = []): T {
+function queryOne<T>(sql: string, params: SQLInputValue[] = []): T {
   const d = getDb();
   const stmt = d.prepare(sql);
-  stmt.bind(params);
-  stmt.step();
-  const row = stmt.getAsObject() as T;
-  stmt.free();
-  return row;
+  const row = stmt.get(...params) as Record<string, unknown> | undefined;
+  return (row ? { ...row } : {}) as T;
 }
 
 export interface StatsOverview {
   total_requests: number;
-  unknown_usage_requests: number;
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_cached_prompt_tokens: number;
@@ -272,7 +266,6 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
 
   const base = queryOne<{
     total_requests: number;
-    unknown_usage_requests: number;
     total_prompt_tokens: number;
     total_completion_tokens: number;
     total_cached_prompt_tokens: number;
@@ -284,7 +277,6 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
   }>(
     `SELECT
       COUNT(*) as total_requests,
-      COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
       COALESCE(SUM(prompt_tokens), 0) as total_prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as total_completion_tokens,
       COALESCE(SUM(cached_prompt_tokens), 0) as total_cached_prompt_tokens,
@@ -353,7 +345,6 @@ export function getStatsOverview(range: TimeRange): StatsOverview {
 export interface TimeSeriesPoint {
   time_bucket: string;
   requests: number;
-  unknown_usage_requests: number;
   prompt_tokens: number;
   completion_tokens: number;
   cached_prompt_tokens: number;
@@ -376,7 +367,6 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
       `SELECT
         strftime('%Y-%m-%d %H:', timestamp, ?) || printf('%02d', (CAST(strftime('%M', timestamp, ?) AS INTEGER) / 5) * 5) as time_bucket,
         COUNT(*) as requests,
-        COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
         COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
         COALESCE(SUM(completion_tokens), 0) as completion_tokens,
         COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
@@ -396,7 +386,6 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
     `SELECT
       strftime('${strftime}', timestamp, ?) as time_bucket,
       COUNT(*) as requests,
-      COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
       COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
@@ -415,7 +404,6 @@ export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
 export interface TopEntry {
   name: string;
   requests: number;
-  unknown_usage_requests: number;
   prompt_tokens: number;
   completion_tokens: number;
   cached_prompt_tokens: number;
@@ -443,7 +431,6 @@ export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
       ip as name,
       model,
       COUNT(*) as requests,
-      COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,
       COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
@@ -462,7 +449,6 @@ export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
     const entry = byIp.get(row.name) ?? {
       name: row.name,
       requests: 0,
-      unknown_usage_requests: 0,
       prompt_tokens: 0,
       completion_tokens: 0,
       cached_prompt_tokens: 0,
@@ -475,7 +461,6 @@ export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
     };
     const cost = calculateUsageCost(row.model, row);
     entry.requests += row.requests;
-    entry.unknown_usage_requests += row.unknown_usage_requests;
     entry.prompt_tokens += row.prompt_tokens;
     entry.completion_tokens += row.completion_tokens;
     entry.cached_prompt_tokens += row.cached_prompt_tokens;
@@ -501,7 +486,6 @@ export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
     `SELECT
       model as name,
       COUNT(*) as requests,
-      COUNT(CASE WHEN usage_known = 0 THEN 1 END) as unknown_usage_requests,
       COUNT(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN 1 END) as ttfb_samples,
       COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
       COALESCE(SUM(completion_tokens), 0) as completion_tokens,

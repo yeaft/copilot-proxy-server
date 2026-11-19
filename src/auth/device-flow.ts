@@ -62,7 +62,7 @@ export async function pollAccessToken(
     }
 
     const json = (await response.json()) as { access_token?: string };
-    logger.debug("Polling access token response:", JSON.stringify(json));
+    logger.debug("Polling access token response:", () => JSON.stringify(json));
 
     if (json.access_token) {
       return json.access_token;

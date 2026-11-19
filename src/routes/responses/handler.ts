@@ -24,7 +24,7 @@ export async function handleResponses(c: Context) {
   const startTime = Date.now();
 
   const payload = await c.req.json<ResponsesPayload>();
-  logger.debug("Responses API request:", JSON.stringify(payload).slice(-400));
+  logger.debug("Responses API request:", () => JSON.stringify(payload).slice(-400));
 
   if (isDeepseekModel(payload.model)) {
     const response = await createDeepseekCompletion(

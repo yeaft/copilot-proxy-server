@@ -5,9 +5,8 @@ import { logger as honoLogger } from "hono/logger";
 import { matchedRoutes } from "hono/route";
 
 import { state } from "./lib/state.js";
-import { HTTPError, forwardError } from "./lib/error.js";
-import { getModelCatalog } from "./services/model-catalog.js";
-import { lokiRouting, lokiError } from "./routes/loki.js";
+import { cacheModels } from "./services/copilot-models.js";
+import { forwardError } from "./lib/error.js";
 
 import { completionRoutes } from "./routes/chat-completions/route.js";
 import { messageRoutes } from "./routes/messages/route.js";
@@ -73,8 +72,6 @@ app.use("*", async (c, next) => {
   return next();
 });
 
-app.use("*", lokiRouting);
-
 // Health check
 app.get("/", (c) =>
   c.json({
@@ -87,15 +84,27 @@ app.get("/", (c) =>
 // Models endpoint
 app.get("/v1/models", async (c) => {
   try {
-    const models = await getModelCatalog();
+    if (!state.models) {
+      await cacheModels();
+    }
+
+    const models = state.models?.data.map((model) => ({
+      id: model.id,
+      object: "model",
+      type: "model",
+      created: 0,
+      created_at: new Date(0).toISOString(),
+      owned_by: model.vendor,
+      display_name: model.name,
+    }));
 
     return c.json({
       object: "list",
-      data: models,
+      data: models ?? [],
       has_more: false,
     });
   } catch (error) {
-    return error instanceof HTTPError ? forwardError(c, error) : lokiError(c, error);
+    return await forwardError(c, error);
   }
 });
 

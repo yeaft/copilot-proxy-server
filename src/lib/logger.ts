@@ -1,5 +1,7 @@
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+export type LogArg = unknown | (() => unknown);
+
 let currentLevel: LogLevel = "info";
 
 const LEVELS: Record<LogLevel, number> = {
@@ -13,6 +15,10 @@ function shouldLog(level: LogLevel): boolean {
   return LEVELS[level] >= LEVELS[currentLevel];
 }
 
+function resolveArgs(args: LogArg[]): unknown[] {
+  return args.map((arg) => (typeof arg === "function" ? (arg as () => unknown)() : arg));
+}
+
 function timestamp(): string {
   return new Date().toISOString();
 }
@@ -22,27 +28,31 @@ export const logger = {
     currentLevel = level;
   },
 
-  debug(...args: unknown[]) {
+  isDebugEnabled(): boolean {
+    return shouldLog("debug");
+  },
+
+  debug(...args: LogArg[]) {
     if (shouldLog("debug")) {
-      console.debug(`[${timestamp()}] [DEBUG]`, ...args);
+      console.debug(`[${timestamp()}] [DEBUG]`, ...resolveArgs(args));
     }
   },
 
-  info(...args: unknown[]) {
+  info(...args: LogArg[]) {
     if (shouldLog("info")) {
-      console.info(`[${timestamp()}] [INFO]`, ...args);
+      console.info(`[${timestamp()}] [INFO]`, ...resolveArgs(args));
     }
   },
 
-  warn(...args: unknown[]) {
+  warn(...args: LogArg[]) {
     if (shouldLog("warn")) {
-      console.warn(`[${timestamp()}] [WARN]`, ...args);
+      console.warn(`[${timestamp()}] [WARN]`, ...resolveArgs(args));
     }
   },
 
-  error(...args: unknown[]) {
+  error(...args: LogArg[]) {
     if (shouldLog("error")) {
-      console.error(`[${timestamp()}] [ERROR]`, ...args);
+      console.error(`[${timestamp()}] [ERROR]`, ...resolveArgs(args));
     }
   },
 };

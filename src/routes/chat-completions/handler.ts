@@ -32,7 +32,7 @@ export async function handleChatCompletion(c: Context) {
   const startTime = Date.now();
 
   const payload = await c.req.json<ChatCompletionsPayload>();
-  logger.debug("OpenAI request payload:", JSON.stringify(payload).slice(-400));
+  logger.debug("OpenAI request payload:", () => JSON.stringify(payload).slice(-400));
 
   if (isDeepseekModel(payload.model)) {
     return handleDeepseekChatCompletion(c, payload, startTime);
