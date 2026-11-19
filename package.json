@@ -7,39 +7,30 @@
   "scripts": {
     "dev": "tsx --watch src/index.ts",
     "build": "tsup",
-    "start": "node dist/index.js",
+    "start": "node --no-warnings=ExperimentalWarning dist/index.js",
     "auth": "tsx src/index.ts --auth",
-    "auth:loki": "tsx src/index.ts --loki-auth",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --no-warnings=ExperimentalWarning --import tsx --test test/*.test.ts",
     "test:api": "node scripts/test-api.mjs",
     "bench": "node scripts/bench-latency.mjs",
     "bench:quick": "node scripts/bench-latency.mjs --rounds 3 --prompt-size short",
     "bench:full": "node scripts/bench-latency.mjs --rounds 5 --prompt-size medium --output bench-results.json"
   },
   "dependencies": {
-    "@azure/msal-node": "^7.1.2",
     "@hono/node-server": "^2.1.0",
     "eventsource-parser": "^3.0.0",
     "gpt-tokenizer": "^2.8.1",
-    "hono": "^4.13.0",
-    "proper-lockfile": "^4.1.2",
-    "sql.js": "^1.14.0"
+    "hono": "^4.13.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.11",
-    "@types/proper-lockfile": "^4.1.4",
-    "@types/sql.js": "^1.4.11",
     "tsup": "^8.3.5",
     "tsx": "^4.23.7",
     "typescript": "^5.9.3"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.5.0"
   },
   "overrides": {
     "esbuild": "^0.28.1"
-  },
-  "optionalDependencies": {
-    "@azure/msal-node-extensions": "^5.5.4"
   }
 }

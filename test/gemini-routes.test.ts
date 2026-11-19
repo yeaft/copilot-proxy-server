@@ -23,7 +23,6 @@ afterEach(() => {
   delete state.apiKey;
   delete state.copilotToken;
   delete state.models;
-  state.copilotEnabled = true;
 });
 
 function geminiRequest(version: typeof versions[number], method: string, headers: HeadersInit = {}, modelId = model) {
@@ -95,23 +94,6 @@ for (const version of versions) {
       assert.equal(upstream.mock.callCount(), stream ? 1 : 3);
     });
   }
-
-  test(`Gemini ${version} preserves provider guards on all three methods`, async (t) => {
-    const upstream = t.mock.method(globalThis, "fetch", async () => {
-      throw new Error("Provider guards must reject before contacting an upstream");
-    });
-    const headers = { "x-goog-api-key": proxyKey };
-    state.copilotEnabled = false;
-    for (const method of ["generateContent", "streamGenerateContent", "countTokens"]) {
-      const loki = await geminiRequest(version, method, headers, "loki/gpt-6.1-sol");
-      assert.equal(loki.status, 400);
-      assert.match((await loki.json()).error.message, /Loki models do not support/);
-      const copilot = await geminiRequest(version, method, headers);
-      assert.equal(copilot.status, 503);
-      assert.match((await copilot.json()).error.message, /Copilot provider is disabled/);
-    }
-    assert.equal(upstream.mock.callCount(), 0);
-  });
 
   test(`Gemini ${version} countTokens is local and accepts all existing auth methods`, async (t) => {
     const upstream = t.mock.method(globalThis, "fetch", async () => {

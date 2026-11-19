@@ -10,9 +10,9 @@ export default defineConfig({
   splitting: false,
   bundle: true,
   platform: "node",
-  // MSAL loads runtime/native broker assets; keep it external in the runner image.
-  external: ["@azure/msal-node", "@azure/msal-node-extensions", "proper-lockfile"],
-  noExternal: [/^(?!better-sqlite3|sql\.js|@azure\/msal-node|proper-lockfile).*/],
+  // Keep `node:` protocol intact because `node:sqlite` cannot be imported without `node:`.
+  removeNodeProtocol: false,
+  noExternal: [/.*/],
   banner: {
     js: `import { createRequire } from 'module'; const require = createRequire(import.meta.url);`,
   },

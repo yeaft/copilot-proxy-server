@@ -4,12 +4,6 @@ A standalone proxy server that exposes GitHub Copilot's LLM capabilities through
 
 Run on any server (including headless machines without GUI) via Docker — no VS Code required.
 
-## Native Microsoft Loki
-
-Microsoft sign-in, model discovery and direct Office upstream forwarding are now built
-into this server (no separate Loki service). Copilot remains the default. See
-[Native Loki configuration and Docker/PowerShell instructions](docs/native-loki.md).
-
 ## Features
 
 - **Multi-format API support** — Chat Completions (`/v1/chat/completions`), Messages (`/v1/messages`), and Gemini-style (`/v1/models/{model}:...`) endpoints
@@ -24,9 +18,8 @@ into this server (no separate Loki service). Copilot remains the default. See
 
 ## Prerequisites
 
-- **Node.js** >= 22
-- For Copilot: a **GitHub account** with an active **GitHub Copilot** subscription
-- For Loki-only: an authorized Microsoft organization account (no GitHub login required)
+- **Node.js** >= 22.5.0
+- A **GitHub account** with an active **GitHub Copilot** subscription
 
 ## Quick Start
 

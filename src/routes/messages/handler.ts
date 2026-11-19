@@ -32,7 +32,7 @@ export async function handleMessagesCompletion(c: Context) {
   const startTime = Date.now();
 
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>();
-  logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload));
+  logger.debug("Anthropic request payload:", () => JSON.stringify(anthropicPayload));
 
   // Route DeepSeek models directly (DeepSeek uses Anthropic-compatible API)
   if (isDeepseekModel(anthropicPayload.model)) {
@@ -40,7 +40,7 @@ export async function handleMessagesCompletion(c: Context) {
   }
 
   const openAIPayload = translateToOpenAI(anthropicPayload);
-  logger.debug("Translated OpenAI payload:", JSON.stringify(openAIPayload));
+  logger.debug("Translated OpenAI payload:", () => JSON.stringify(openAIPayload));
 
   const clientHeaders = extractClientHeaders(c);
   const response = await createChatCompletions(openAIPayload, clientHeaders);
