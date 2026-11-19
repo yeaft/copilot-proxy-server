@@ -194,7 +194,9 @@ export function chatToResponsesPayload(
     out.text = {};
     if (format) {
       out.text.format = format.type === "json_schema"
-        ? { type: "json_schema", ...format.json_schema }
+        // As with tools, Responses treats an omitted `strict` as true and then
+        // rejects ordinary schemas (optional fields) that Chat Completions accepts.
+        ? { type: "json_schema", ...format.json_schema, strict: format.json_schema.strict ?? false }
         : { type: format.type };
     }
     if (payload.verbosity) out.text.verbosity = payload.verbosity;

@@ -211,6 +211,18 @@ test("sampling, reasoning, structured output and cache parameters are mapped", (
   });
 });
 
+test("json_schema response_format keeps Chat Completions' non-strict default", () => {
+  const schema = { type: "object", properties: { fruit: { type: "string" } } };
+  const out = chatToResponsesPayload(request({
+    response_format: { type: "json_schema", json_schema: { name: "fruit", schema } },
+  }));
+  assert.deepEqual(out.text, { format: { type: "json_schema", name: "fruit", schema, strict: false } });
+  assert.deepEqual(
+    chatToResponsesPayload(request({ response_format: { type: "json_object" } })).text,
+    { format: { type: "json_object" } }
+  );
+});
+
 test("codex models drop temperature/top_p and non-reasoning models omit reasoning", () => {
   const codex = chatToResponsesPayload(request({ model: "gpt-5.3-codex", temperature: 0.5, top_p: 0.5 }));
   assert.equal(codex.temperature, undefined);
