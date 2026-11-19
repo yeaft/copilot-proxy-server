@@ -177,6 +177,7 @@ export function translateOpenAIToGemini(
 
     if (choice.message.tool_calls) {
       for (const tc of choice.message.tool_calls) {
+        if (tc.type === "custom") continue; // this route only sends function tools
         parts.push({
           functionCall: {
             id: tc.id,

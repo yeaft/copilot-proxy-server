@@ -242,7 +242,10 @@ export function translateToAnthropic(
 
   for (const choice of response.choices) {
     const textBlocks = getAnthropicTextBlocks(choice.message.content);
-    const toolUseBlocks = getAnthropicToolUseBlocks(choice.message.tool_calls);
+    // This route only sends function tools, so custom tool calls cannot appear.
+    const toolUseBlocks = getAnthropicToolUseBlocks(
+      choice.message.tool_calls?.filter((call): call is ToolCall => call.type === "function")
+    );
     allTextBlocks.push(...textBlocks);
     allToolUseBlocks.push(...toolUseBlocks);
 

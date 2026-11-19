@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createResponses } from "../src/services/copilot-completions.js";
 import {
-  createResponses,
   responsesStreamToChatStream,
   responsesToChatResponse,
-} from "../src/services/copilot-completions.js";
+} from "../src/services/chat-responses-bridge.js";
 import { state } from "../src/lib/state.js";
 import type { ResponsesPayload, ResponsesResult } from "../src/types/responses.js";
 
@@ -76,7 +76,7 @@ test("Responses stream conversion preserves cached input tokens", async () => {
 
   const chunks = [];
   for await (const chunk of responsesStreamToChatStream(source(), response.model)) {
-    chunks.push(JSON.parse(chunk.data));
+    if (chunk.data !== "[DONE]") chunks.push(JSON.parse(chunk.data));
   }
 
   assert.equal(chunks.at(-1)?.usage?.prompt_tokens_details?.cached_tokens, 800);

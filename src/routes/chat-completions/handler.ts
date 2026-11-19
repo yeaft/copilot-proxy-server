@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { streamSSE, type SSEMessage } from "hono/streaming";
+import { streamSSE } from "hono/streaming";
 
 import { logger } from "../../lib/logger.js";
 import { state } from "../../lib/state.js";
@@ -10,18 +10,25 @@ import { getClientIp } from "../../lib/ip.js";
 import { hasChatOutput } from "../../lib/latency.js";
 import {
   createChatCompletions,
-  shouldUseResponsesApi,
   createResponses,
-  chatToResponsesPayload,
-  responsesToChatResponse,
-  responsesStreamToChatStream,
+  hasImageInput,
+  initiatorFor,
+  modelSupportsReasoning,
+  shouldUseResponsesApi,
 } from "../../services/copilot-completions.js";
+import {
+  chatToResponsesPayload,
+  responsesStreamToChatStream,
+  responsesToChatResponse,
+  UnsupportedChatParameterError,
+} from "../../services/chat-responses-bridge.js";
 import type {
   ChatCompletionsPayload,
   ChatCompletionResponse,
   ChatCompletionChunk,
+  ChatCompletionUsage,
 } from "../../types/openai.js";
-import type { ResponsesResult } from "../../types/responses.js";
+import type { ResponsesPayload, ResponsesResult } from "../../types/responses.js";
 import {
   createDeepseekCompletion,
   isDeepseekModel,
@@ -55,52 +62,19 @@ export async function handleChatCompletion(c: Context) {
   }
 
   const clientHeaders = extractClientHeaders(c);
-  const response = await createChatCompletions(payload, clientHeaders);
+  const response = await createChatCompletions(payload, clientHeaders, { forwardDone: true });
   const ip = getClientIp(c);
+  const record = (usage: ChatCompletionUsage | null | undefined, stream: boolean, ttfb: number) =>
+    logChatUsage(ip, payload.model, usage, stream, Date.now() - startTime, ttfb);
 
   if (isNonStreaming(response)) {
     logger.debug("Non-streaming response");
-    logUsage({
-      ip,
-      model: payload.model,
-      endpoint: "openai",
-      prompt_tokens: response.usage?.prompt_tokens ?? 0,
-      completion_tokens: response.usage?.completion_tokens ?? 0,
-      total_tokens: response.usage?.total_tokens ?? 0,
-      cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-      stream: false,
-      duration_ms: Date.now() - startTime,
-      ttfb_ms: 0,
-    });
+    record(response.usage, false, 0);
     return c.json(response);
   }
 
   logger.debug("Streaming response");
-  return streamSSE(c, async (stream) => {
-    let lastUsage: ChatCompletionChunk["usage"] | undefined;
-    let ttfb = 0;
-    for await (const chunk of response) {
-      // Track usage and the first user-visible output chunk.
-      try {
-        const parsed = JSON.parse(chunk.data) as ChatCompletionChunk;
-        if (!ttfb && hasChatOutput(parsed)) ttfb = Date.now() - startTime;
-        if (parsed.usage) lastUsage = parsed.usage;
-      } catch { /* ignore parse errors */ }
-      await stream.writeSSE(chunk as SSEMessage);
-    }
-    logUsage({
-      ip,
-      model: payload.model,
-      endpoint: "openai",
-      prompt_tokens: lastUsage?.prompt_tokens ?? 0,
-      completion_tokens: lastUsage?.completion_tokens ?? 0,
-      total_tokens: lastUsage?.total_tokens ?? 0,
-      cached_prompt_tokens: lastUsage?.prompt_tokens_details?.cached_tokens ?? 0,
-      stream: true,
-      duration_ms: Date.now() - startTime,
-      ttfb_ms: ttfb,
-    });
-  });
+  return streamChatChunks(c, response, startTime, record);
 }
 
 /**
@@ -114,57 +88,122 @@ async function handleViaResponsesApi(
 ) {
   logger.debug(`Model ${payload.model}: routing chat/completions → /responses`);
 
-  const responsesPayload = chatToResponsesPayload(payload);
-  const clientHeaders = extractClientHeaders(c);
-  const response = await createResponses(responsesPayload, clientHeaders);
-  const ip = getClientIp(c);
+  let responsesPayload: ResponsesPayload;
+  try {
+    responsesPayload = chatToResponsesPayload(payload, {
+      reasoning: modelSupportsReasoning(payload.model),
+    });
+  } catch (error) {
+    if (!(error instanceof UnsupportedChatParameterError)) throw error;
+    return c.json(
+      {
+        error: {
+          message: error.message,
+          type: "invalid_request_error",
+          param: error.param,
+          code: "unsupported_parameter",
+        },
+      },
+      400
+    );
+  }
 
-  // Non-streaming
+  const response = await createResponses(responsesPayload, extractClientHeaders(c), {
+    vision: hasImageInput(payload.messages),
+    initiator: initiatorFor(payload.messages),
+  });
+  const ip = getClientIp(c);
+  const record = (usage: ChatCompletionUsage | null | undefined, stream: boolean, ttfb: number) =>
+    logChatUsage(ip, payload.model, usage, stream, Date.now() - startTime, ttfb);
+
   if (isResponsesResult(response)) {
     const chatResponse = responsesToChatResponse(response, payload.model);
-    logUsage({
-      ip,
-      model: payload.model,
-      endpoint: "openai",
-      prompt_tokens: response.usage?.input_tokens ?? 0,
-      completion_tokens: response.usage?.output_tokens ?? 0,
-      total_tokens: response.usage?.total_tokens ?? 0,
-      cached_prompt_tokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
-      stream: false,
-      duration_ms: Date.now() - startTime,
-      ttfb_ms: 0,
-    });
+    record(chatResponse.usage, false, 0);
+    if (response.status === "failed") {
+      return c.json(
+        {
+          error: {
+            message: response.error?.message || "Upstream response failed",
+            type: "upstream_error",
+            code: response.error?.code ?? null,
+          },
+        },
+        502
+      );
+    }
     return c.json(chatResponse);
   }
 
-  // Streaming: convert responses stream → chat completions chunks
-  const chatStream = responsesStreamToChatStream(response, payload.model);
+  // The bridge always emits usage (on the finish chunk, or on the trailing
+  // usage chunk with include_usage), so streamChatChunks can account for it.
+  const chatStream = responsesStreamToChatStream(response, payload.model, {
+    includeUsage: payload.stream_options?.include_usage === true,
+  });
+  return streamChatChunks(c, chatStream, startTime, record);
+}
 
+/**
+ * Relay chat-completion SSE data to the client, tracking TTFT and usage.
+ * A failure mid-stream is reported as an OpenAI-style `{"error": …}` chunk
+ * (without `[DONE]`) instead of silently closing the connection.
+ */
+function streamChatChunks(
+  c: Context,
+  source: AsyncIterable<{ data: string }>,
+  startTime: number,
+  record: (usage: ChatCompletionUsage | null | undefined, stream: boolean, ttfb: number) => void
+) {
   return streamSSE(c, async (stream) => {
-    let lastUsage: ChatCompletionChunk["usage"] | undefined;
+    let lastUsage: ChatCompletionUsage | null | undefined;
     let ttfb = 0;
-
-    for await (const chunk of chatStream) {
-      try {
-        const parsed = JSON.parse(chunk.data) as ChatCompletionChunk;
-        if (!ttfb && hasChatOutput(parsed)) ttfb = Date.now() - startTime;
-        if (parsed.usage) lastUsage = parsed.usage;
-      } catch { /* ignore */ }
-      await stream.writeSSE({ data: chunk.data });
+    try {
+      for await (const chunk of source) {
+        if (chunk.data !== "[DONE]") {
+          try {
+            const parsed = JSON.parse(chunk.data) as ChatCompletionChunk;
+            if (!ttfb && hasChatOutput(parsed)) ttfb = Date.now() - startTime;
+            if (parsed.usage) lastUsage = parsed.usage;
+          } catch { /* not a chunk we track */ }
+        }
+        await stream.writeSSE({ data: chunk.data });
+      }
+    } catch (error) {
+      logger.error("Chat completions stream failed:", error);
+      await stream.writeSSE({
+        data: JSON.stringify({
+          error: {
+            message: error instanceof Error ? error.message : String(error),
+            type: "upstream_error",
+            code: null,
+          },
+        }),
+      });
+    } finally {
+      record(lastUsage, true, ttfb);
     }
+  });
+}
 
-    logUsage({
-      ip,
-      model: payload.model,
-      endpoint: "openai",
-      prompt_tokens: lastUsage?.prompt_tokens ?? 0,
-      completion_tokens: lastUsage?.completion_tokens ?? 0,
-      total_tokens: lastUsage?.total_tokens ?? 0,
-      cached_prompt_tokens: lastUsage?.prompt_tokens_details?.cached_tokens ?? 0,
-      stream: true,
-      duration_ms: Date.now() - startTime,
-      ttfb_ms: ttfb,
-    });
+function logChatUsage(
+  ip: string,
+  model: string,
+  usage: ChatCompletionUsage | null | undefined,
+  stream: boolean,
+  durationMs: number,
+  ttfbMs: number
+) {
+  logUsage({
+    ip,
+    model,
+    endpoint: "openai",
+    prompt_tokens: usage?.prompt_tokens ?? 0,
+    completion_tokens: usage?.completion_tokens ?? 0,
+    total_tokens: usage?.total_tokens ?? 0,
+    cached_prompt_tokens: usage?.prompt_tokens_details?.cached_tokens ?? 0,
+    cache_write_prompt_tokens: usage?.prompt_tokens_details?.cache_write_tokens ?? 0,
+    stream,
+    duration_ms: durationMs,
+    ttfb_ms: ttfbMs,
   });
 }
 
