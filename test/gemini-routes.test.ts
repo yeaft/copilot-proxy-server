@@ -25,13 +25,13 @@ afterEach(() => {
   delete state.models;
 });
 
-function geminiRequest(version: typeof versions[number], method: string, headers: HeadersInit = {}, modelId = model) {
+function geminiRequest(version: typeof versions[number], method: string, headers: HeadersInit = {}, body: unknown = requestBody) {
   const requestHeaders = new Headers(headers);
   requestHeaders.set("content-type", "application/json");
-  return app.request(`/${version}/models/${modelId}:${method}`, {
+  return app.request(`/${version}/models/${model}:${method}`, {
     method: "POST",
     headers: requestHeaders,
-    body: JSON.stringify(requestBody),
+    body: JSON.stringify(body),
   });
 }
 
@@ -119,6 +119,62 @@ for (const version of versions) {
     }
   });
 }
+
+test("Gemini tool loops preserve SDK JSON schemas, legacy schemas, and text after tool results", async (t) => {
+  const parametersJsonSchema = {
+    type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false,
+  };
+  const parameters = { type: "object", properties: { city: { type: "string" } } };
+  const body = {
+    ...requestBody,
+    tools: [{ functionDeclarations: [
+      { name: "lookup", parametersJsonSchema },
+      { name: "legacy", parameters },
+      { name: "status" },
+    ] }],
+  };
+  const call = { id: "call_lookup", name: "lookup", args: { name: "A" } };
+  const toolResult = { value: "MANGO42" };
+  const upstream = t.mock.method(globalThis, "fetch", async (_input: string, init?: RequestInit) => {
+    const payload = JSON.parse(String(init?.body)) as ChatCompletionsPayload;
+    assert.deepEqual(payload.tools?.map((tool) => tool.type === "function" && tool.function.parameters), [
+      parametersJsonSchema, parameters, { type: "object", properties: {} },
+    ]);
+    if (payload.stream) {
+      assert.deepEqual(payload.messages, [{ role: "user", content: "Reply OK." }]);
+      const events = [
+        { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: call.id, type: "function", function: { name: call.name, arguments: JSON.stringify(call.args) } }] }, finish_reason: null }] },
+        { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+      ];
+      return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n", {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+    assert.deepEqual(payload.messages.slice(1), [
+      { role: "assistant", content: null, tool_calls: [{ id: call.id, type: "function", function: { name: call.name, arguments: JSON.stringify(call.args) } }] },
+      { role: "tool", tool_call_id: call.id, content: JSON.stringify(toolResult) },
+      { role: "user", content: "Return just the code." },
+    ]);
+    return Response.json({ choices: [{ index: 0, message: { content: toolResult.value }, finish_reason: "stop" }] });
+  });
+  const headers = { "x-goog-api-key": proxyKey };
+  const first = await geminiRequest("v1", "streamGenerateContent?alt=sse", headers, body);
+  assert.equal(first.status, 200);
+  const events = (await first.text()).split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6)));
+  const modelContent = events[0].candidates[0].content;
+  assert.deepEqual(modelContent.parts, [{ functionCall: call }]);
+  assert.equal(events[1].candidates[0].finishReason, "STOP");
+  const second = await geminiRequest("v1beta", "generateContent", headers, {
+    ...body,
+    contents: [...body.contents, modelContent, { role: "user", parts: [
+      { functionResponse: { id: call.id, name: call.name, response: toolResult } },
+      { text: "Return just the code." },
+    ] }],
+  });
+  assert.equal(second.status, 200);
+  assert.deepEqual((await second.json()).candidates[0].content.parts, [{ text: toolResult.value }]);
+  assert.equal(upstream.mock.callCount(), 2);
+});
 
 test("Google SDK credentials are not accepted on unrelated routes or methods", async () => {
   const headers = { "x-goog-api-key": proxyKey };

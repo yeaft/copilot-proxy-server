@@ -29,6 +29,7 @@ export interface GeminiTool {
     name: string;
     description?: string;
     parameters?: Record<string, unknown>;
+    parametersJsonSchema?: Record<string, unknown>;
   }>;
 }
 
