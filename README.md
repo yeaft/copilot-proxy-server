@@ -270,7 +270,7 @@ Estimate the token count for a Messages-style request.
 POST /v1/models/{model}:generateContent
 ```
 
-Gemini-style content generation endpoint (non-streaming). Use the stable `/v1` API for new integrations; `/v1beta` remains available for all three Gemini methods as a compatibility alias. Use a model available to your Copilot account (see `GET /v1/models`). The proxy translates these requests to Copilot Chat Completions; it does not forward to Google's Gemini API. Google-only features (such as Search grounding and Files/Live APIs) are not supported.
+Gemini-style content generation endpoint (non-streaming). Use the stable `/v1` API for new integrations; `/v1beta` remains available for all three Gemini methods as a compatibility alias. Use a model available to your Copilot account (see `GET /v1/models`). The proxy translates these requests to Copilot Chat Completions; it does not forward to Google's Gemini API. Function declarations support `parametersJsonSchema` and legacy `parameters` (use one or the other). Google-only features (such as Search grounding and Files/Live APIs) are not supported.
 
 **Example:**
 

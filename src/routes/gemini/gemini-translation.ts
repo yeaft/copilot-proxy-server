@@ -82,6 +82,12 @@ function convertGeminiContentToOpenAI(content: GeminiContent): Message[] {
         content: JSON.stringify(fr.functionResponse.response),
       });
     }
+    // Gemini can combine tool results and the next user input in one content.
+    // Chat Completions requires one tool message per result, followed by user input.
+    const userInput = content.parts.filter((part) => "text" in part || "inlineData" in part);
+    if (userInput.length > 0) {
+      messages.push(...convertGeminiContentToOpenAI({ role: "user", parts: userInput }));
+    }
     return messages;
   }
 
@@ -153,7 +159,7 @@ function translateGeminiToolsToOpenAI(tools: GeminiTool[]): Tool[] {
           function: {
             name: fn.name,
             description: fn.description,
-            parameters: fn.parameters || {},
+            parameters: fn.parametersJsonSchema ?? fn.parameters ?? { type: "object", properties: {} },
           },
         });
       }
