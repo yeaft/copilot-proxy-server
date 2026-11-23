@@ -4,6 +4,7 @@ import { copilotBaseUrl, copilotHeaders } from "../auth/api-config.js";
 import { HTTPError } from "../lib/error.js";
 import { logger } from "../lib/logger.js";
 import { state } from "../lib/state.js";
+import { fetchModelUpstream } from "../lib/upstream-fetch.js";
 import type {
   ChatCompletionsPayload,
   ChatCompletionResponse,
@@ -83,7 +84,7 @@ export async function createChatCompletions(
     "X-Initiator": initiatorFor(payload.messages),
   };
 
-  const response = await fetch(`${copilotBaseUrl(state)}/chat/completions`, {
+  const response = await fetchModelUpstream(`${copilotBaseUrl(state)}/chat/completions`, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
@@ -196,7 +197,7 @@ export async function createResponses(
     "X-Initiator": options.initiator ?? "user",
   };
 
-  const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
+  const response = await fetchModelUpstream(`${copilotBaseUrl(state)}/responses`, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),

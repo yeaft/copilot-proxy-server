@@ -2,6 +2,7 @@ import * as zlib from "node:zlib";
 
 import { logger } from "../lib/logger.js";
 import { state } from "../lib/state.js";
+import { fetchModelUpstream } from "../lib/upstream-fetch.js";
 
 const DEEPSEEK_DEFAULT_HOST = "https://api.deepseek.com";
 const ANTHROPIC_VERSION = "2023-06-01";
@@ -53,7 +54,7 @@ export async function createDeepseekCompletion(
 
   logger.debug(`DeepSeek request → ${url} model=${payload.model}`);
 
-  const response = await fetch(url, {
+  const response = await fetchModelUpstream(url, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),

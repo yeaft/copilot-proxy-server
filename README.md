@@ -130,6 +130,8 @@ If `API_KEY` is not set, no client authentication is required (suitable for loca
 
 ## API Endpoints
 
+For every model request (Copilot and direct DeepSeek), the proxy waits up to 120 seconds for upstream HTTP response headers. If no headers arrive, it cancels that attempt and returns HTTP `504` with error code `upstream_headers_timeout`. The proxy does not retry; clients decide whether to retry. Once upstream headers arrive, this timeout no longer applies to the response body or SSE stream.
+
 ### Health Check
 
 ```

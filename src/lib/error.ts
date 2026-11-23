@@ -12,8 +12,28 @@ export class HTTPError extends Error {
   }
 }
 
+export class UpstreamHeadersTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Upstream did not send response headers within ${timeoutMs / 1000} seconds.`);
+    this.name = "UpstreamHeadersTimeoutError";
+  }
+}
+
 export async function forwardError(c: Context, error: unknown) {
   logger.error("Error occurred:", error);
+
+  if (error instanceof UpstreamHeadersTimeoutError) {
+    return c.json(
+      {
+        error: {
+          message: error.message,
+          type: "upstream_error",
+          code: "upstream_headers_timeout",
+        },
+      },
+      504
+    );
+  }
 
   if (error instanceof HTTPError) {
     const errorText = await error.response.text();
