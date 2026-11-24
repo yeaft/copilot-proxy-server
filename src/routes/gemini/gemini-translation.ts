@@ -75,7 +75,7 @@ export function translateGeminiToOpenAI(
         const image = readToolImage(part);
         if (!image) continue;
         if (!labeled) {
-          attachments.push({ type: "text", text: `Image(s) from tool result ${id}:` });
+          attachments.push({ type: "text", text: "Images from a tool result:" });
           labeled = true;
         }
         attachments.push(image);
