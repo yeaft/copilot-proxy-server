@@ -5,11 +5,13 @@ import type {
   Message,
   Tool,
   ContentPart,
+  ImagePart,
 } from "../../types/openai.js";
 import type {
   GeminiGenerateContentRequest,
   GeminiGenerateContentResponse,
   GeminiContent,
+  GeminiFunctionResponse,
   GeminiPart,
   GeminiTool,
 } from "./gemini-types.js";
@@ -44,13 +46,42 @@ export function translateGeminiToOpenAI(
     }
   }
 
-  // Contents
-  if (request.contents) {
-    for (const content of request.contents) {
-      const converted = convertGeminiContentToOpenAI(content);
-      messages.push(...converted);
+  // Keep consecutive tool results together. Chat Completions expects every
+  // tool message in the batch before any user message (including attachments).
+  let attachments: ContentPart[] = [];
+  let followUps: Message[] = [];
+  const flushToolImagesAndInput = () => {
+    if (attachments.length > 0) messages.push({ role: "user", content: attachments });
+    messages.push(...followUps);
+    attachments = [];
+    followUps = [];
+  };
+  for (const content of request.contents ?? []) {
+    const responses = content.parts.filter(
+      (part): part is { functionResponse: GeminiFunctionResponse } => "functionResponse" in part
+    );
+    if (responses.length === 0) {
+      flushToolImagesAndInput();
+      messages.push(...convertGeminiContentToOpenAI(content));
+      continue;
+    }
+    for (const { functionResponse } of responses) {
+      const id = functionResponse.id || functionResponse.name;
+      messages.push({ role: "tool", tool_call_id: id, content: JSON.stringify(functionResponse.response) });
+      const images = Array.isArray(functionResponse.parts)
+        ? functionResponse.parts.flatMap(inlineToolImage)
+        : [];
+      if (images.length > 0) {
+        attachments.push({ type: "text", text: `Image(s) from tool result ${id}:` }, ...images);
+      }
+    }
+    // Gemini may combine tool results and follow-up user input in one content.
+    const userInput = content.parts.filter((part) => "text" in part || "inlineData" in part);
+    if (userInput.length > 0) {
+      followUps.push(...convertGeminiContentToOpenAI({ role: "user", parts: userInput }));
     }
   }
+  flushToolImagesAndInput();
 
   const payload: ChatCompletionsPayload = {
     model: modelId,
@@ -81,32 +112,29 @@ export function translateGeminiToOpenAI(
   return payload;
 }
 
+/** Promote only structured, canonical base64 with a matching raster signature. */
+function inlineToolImage(part: unknown): ImagePart[] {
+  if (!part || typeof part !== "object" || !("inlineData" in part)) return [];
+  const { inlineData } = part;
+  if (!inlineData || typeof inlineData !== "object" || !("mimeType" in inlineData) || !("data" in inlineData)) return [];
+  const { mimeType, data } = inlineData;
+  if (mimeType !== "image/png" && mimeType !== "image/jpeg" && mimeType !== "image/gif" && mimeType !== "image/webp") return [];
+  if (typeof data !== "string" || !data.length || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) return [];
+
+  // Verify padding bits and magic bytes without decoding the full attachment.
+  const tail = data.slice(-4);
+  if (Buffer.from(tail, "base64").toString("base64") !== tail) return [];
+  const header = Buffer.from(data.slice(0, 16), "base64");
+  const matches = mimeType === "image/png" ? header.subarray(0, 8).toString("hex") === "89504e470d0a1a0a"
+    : mimeType === "image/jpeg" ? header.subarray(0, 3).toString("hex") === "ffd8ff"
+    : mimeType === "image/gif" ? ["GIF87a", "GIF89a"].includes(header.toString("latin1", 0, 6))
+    : header.toString("latin1", 0, 4) === "RIFF" && header.toString("latin1", 8, 12) === "WEBP";
+  return matches ? [{ type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } }] : [];
+}
+
 function convertGeminiContentToOpenAI(content: GeminiContent): Message[] {
   const role = content.role === "model" ? "assistant" : content.role === "function" ? "tool" : "user";
   const messages: Message[] = [];
-
-  // Check for function responses (tool results)
-  const functionResponses = content.parts.filter(
-    (p): p is { functionResponse: { id?: string; name: string; response: Record<string, unknown> } } =>
-      "functionResponse" in p
-  );
-
-  if (functionResponses.length > 0) {
-    for (const fr of functionResponses) {
-      messages.push({
-        role: "tool",
-        tool_call_id: fr.functionResponse.id || fr.functionResponse.name,
-        content: JSON.stringify(fr.functionResponse.response),
-      });
-    }
-    // Gemini can combine tool results and the next user input in one content.
-    // Chat Completions requires one tool message per result, followed by user input.
-    const userInput = content.parts.filter((part) => "text" in part || "inlineData" in part);
-    if (userInput.length > 0) {
-      messages.push(...convertGeminiContentToOpenAI({ role: "user", parts: userInput }));
-    }
-    return messages;
-  }
 
   // Check for function calls (tool calls from assistant)
   const functionCalls = content.parts.filter(

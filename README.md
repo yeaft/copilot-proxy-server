@@ -296,6 +296,8 @@ curl -X POST http://localhost:6628/v1/models/gemini-4-carbon:generateContent \
 
 **Translated parameters:** `contents`, `systemInstruction`, `generationConfig` (`temperature`, `topP`, `maxOutputTokens`, `stopSequences`, `candidateCount`), function declarations, and basic function calling modes. For Gemini 4 and Gemini 3.8 Flash, `generationConfig.thinkingConfig.thinkingLevel` maps to Copilot `reasoning_effort` (including `XHIGH` for Neon and Hydrogen). Availability depends on your Copilot account. Thinking budgets and thought summaries are not translated. The upstream model may limit some of these parameters.
 
+**Images in function results:** `functionResponse.parts[].inlineData` can carry base64 PNG, JPEG, GIF, or WebP images. The proxy preserves the JSON in `functionResponse.response` as the tool result and sends validated attachments as user image input after the tool results. Invalid attachments and `fileData` references are ignored; the proxy does not fetch images. Image support depends on the upstream model.
+
 **Google Gen AI JavaScript SDK (`@google/genai`):**
 
 ```js

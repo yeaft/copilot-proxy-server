@@ -21,8 +21,16 @@ export interface GeminiContent {
 export type GeminiPart =
   | { text: string }
   | { functionCall: { id?: string; name: string; args: Record<string, unknown> } }
-  | { functionResponse: { id?: string; name: string; response: Record<string, unknown> } }
+  | { functionResponse: GeminiFunctionResponse }
   | { inlineData: { mimeType: string; data: string } };
+
+export interface GeminiFunctionResponse {
+  id?: string;
+  name: string;
+  response: Record<string, unknown>;
+  // Only validated inline image parts are translated. File references are unsupported.
+  parts?: unknown[];
+}
 
 export interface GeminiTool {
   functionDeclarations?: Array<{
