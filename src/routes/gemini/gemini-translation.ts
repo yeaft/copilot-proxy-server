@@ -5,7 +5,6 @@ import type {
   Message,
   Tool,
   ContentPart,
-  ImagePart,
 } from "../../types/openai.js";
 import type {
   GeminiGenerateContentRequest,
@@ -15,6 +14,7 @@ import type {
   GeminiPart,
   GeminiTool,
 } from "./gemini-types.js";
+import { toolImageReader } from "./tool-images.js";
 
 // === Request translation (Gemini -> OpenAI) ===
 
@@ -48,6 +48,7 @@ export function translateGeminiToOpenAI(
 
   // Keep consecutive tool results together. Chat Completions expects every
   // tool message in the batch before any user message (including attachments).
+  const readToolImage = toolImageReader();
   let attachments: ContentPart[] = [];
   let followUps: Message[] = [];
   const flushToolImagesAndInput = () => {
@@ -68,11 +69,16 @@ export function translateGeminiToOpenAI(
     for (const { functionResponse } of responses) {
       const id = functionResponse.id || functionResponse.name;
       messages.push({ role: "tool", tool_call_id: id, content: JSON.stringify(functionResponse.response) });
-      const images = Array.isArray(functionResponse.parts)
-        ? functionResponse.parts.flatMap(inlineToolImage)
-        : [];
-      if (images.length > 0) {
-        attachments.push({ type: "text", text: `Image(s) from tool result ${id}:` }, ...images);
+      if (!Array.isArray(functionResponse.parts)) continue;
+      let labeled = false;
+      for (const part of functionResponse.parts) {
+        const image = readToolImage(part);
+        if (!image) continue;
+        if (!labeled) {
+          attachments.push({ type: "text", text: `Image(s) from tool result ${id}:` });
+          labeled = true;
+        }
+        attachments.push(image);
       }
     }
     // Gemini may combine tool results and follow-up user input in one content.
@@ -110,26 +116,6 @@ export function translateGeminiToOpenAI(
   }
 
   return payload;
-}
-
-/** Promote only structured, canonical base64 with a matching raster signature. */
-function inlineToolImage(part: unknown): ImagePart[] {
-  if (!part || typeof part !== "object" || !("inlineData" in part)) return [];
-  const { inlineData } = part;
-  if (!inlineData || typeof inlineData !== "object" || !("mimeType" in inlineData) || !("data" in inlineData)) return [];
-  const { mimeType, data } = inlineData;
-  if (mimeType !== "image/png" && mimeType !== "image/jpeg" && mimeType !== "image/gif" && mimeType !== "image/webp") return [];
-  if (typeof data !== "string" || !data.length || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) return [];
-
-  // Verify padding bits and magic bytes without decoding the full attachment.
-  const tail = data.slice(-4);
-  if (Buffer.from(tail, "base64").toString("base64") !== tail) return [];
-  const header = Buffer.from(data.slice(0, 16), "base64");
-  const matches = mimeType === "image/png" ? header.subarray(0, 8).toString("hex") === "89504e470d0a1a0a"
-    : mimeType === "image/jpeg" ? header.subarray(0, 3).toString("hex") === "ffd8ff"
-    : mimeType === "image/gif" ? ["GIF87a", "GIF89a"].includes(header.toString("latin1", 0, 6))
-    : header.toString("latin1", 0, 4) === "RIFF" && header.toString("latin1", 8, 12) === "WEBP";
-  return matches ? [{ type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } }] : [];
 }
 
 function convertGeminiContentToOpenAI(content: GeminiContent): Message[] {

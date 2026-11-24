@@ -306,6 +306,8 @@ test("Gemini ignores invalid and non-inline attachments without interpreting opa
     { inlineData: { mimeType: "image/png", data: png.slice(0, -1) } },
     { inlineData: { mimeType: "image/png", data: `${png}\n` } },
     { inlineData: { mimeType: "image/png", data: "aGVsbG8=" } },
+    { inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } }, // PNG signature only
+    { inlineData: { mimeType: "image/png", data: png.slice(0, -4) } }, // truncated PNG, still canonical base64
     { inlineData: { mimeType: "image/jpeg", data: png } },
   ];
   let hasImage = false;
