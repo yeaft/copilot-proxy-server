@@ -11,7 +11,7 @@ function createApp() {
   dashboardRoutes.post("/login", auth.login);
   dashboardRoutes.use("*", auth.middleware);
   dashboardRoutes.get("/", (c) => c.text("dashboard"));
-  dashboardRoutes.get("/api/stats", (c) => c.json({ ok: true }));
+  dashboardRoutes.get("/api/metrics", (c) => c.json({ ok: true }));
 
   const app = new Hono();
   app.route("/dashboard", dashboardRoutes);
@@ -59,7 +59,7 @@ test("dashboard rejects invalid login and expires API access cleanly", async () 
   assert.equal(page.status, 303);
   assert.equal(page.headers.get("location"), "/dashboard/login");
 
-  const api = await app.request("http://localhost/dashboard/api/stats");
+  const api = await app.request("http://localhost/dashboard/api/metrics");
   assert.equal(api.status, 401);
   assert.deepEqual(await api.json(), { error: "Dashboard session expired." });
 });

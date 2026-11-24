@@ -14,7 +14,8 @@ FROM node:22-alpine AS runner
 
 WORKDIR /app
 
-# dist/index.js is a self-contained ESM bundle using only Node 22 built-ins (including node:sqlite).
+# dist/index.js is a self-contained ESM bundle using only Node 22 built-ins (including node:sqlite);
+# dist/assets/ holds the dashboard UI files it serves.
 COPY package.json ./
 COPY --from=builder /app/dist ./dist
 

@@ -1,14 +1,15 @@
 import { Hono } from "hono";
-import { streamSSE } from "hono/streaming";
 
 import { forwardError } from "../../lib/error.js";
 import { logger } from "../../lib/logger.js";
 import { state } from "../../lib/state.js";
 import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
-import { logUsage } from "../../lib/db.js";
-import { getClientIp } from "../../lib/ip.js";
-import { hasChatOutput } from "../../lib/latency.js";
+import {
+  chatUsage,
+  observeModelRequest,
+  streamObserved,
+} from "../../lib/request-observation.js";
 import { createChatCompletions } from "../../services/copilot-completions.js";
 import type {
   ChatCompletionChunk,
@@ -26,137 +27,90 @@ export const geminiRoutes = new Hono();
 // POST /models/{model}:generateContent (mounted under /v1 and /v1beta)
 geminiRoutes.post(
   "/:modelWithMethod{.+\\:generateContent}",
-  async (c) => {
-    try {
-      await checkRateLimit(state);
-      const startTime = Date.now();
+  (c) => observeModelRequest(c, "gemini", async (observation) => {
+    await checkRateLimit(state);
 
-      const { modelWithMethod } = c.req.param();
-      const modelId = modelWithMethod.split(":")[0];
-      const requestBody =
-        await c.req.json<GeminiGenerateContentRequest>();
+    const { modelWithMethod } = c.req.param();
+    const modelId = modelWithMethod.split(":")[0];
+    observation.identify(modelId);
+    const requestBody =
+      await c.req.json<GeminiGenerateContentRequest>();
+    observation.request(modelId, false);
 
-      logger.debug(
-        `generateContent for model ${modelId}:`,
-        () => JSON.stringify(requestBody)
+    logger.debug(
+      `generateContent for model ${modelId}:`,
+      () => JSON.stringify(requestBody)
+    );
+
+    const openAIPayload = translateGeminiToOpenAI(modelId, requestBody);
+    openAIPayload.stream = false;
+
+    const clientHeaders = extractClientHeaders(c);
+    const response = await createChatCompletions(openAIPayload, clientHeaders);
+
+    if (!isNonStreaming(response)) {
+      return c.json(
+        { error: { code: 500, message: "Unexpected streaming response", status: "INTERNAL_ERROR" } },
+        500
       );
-
-      const openAIPayload = translateGeminiToOpenAI(modelId, requestBody);
-      openAIPayload.stream = false;
-
-      const clientHeaders = extractClientHeaders(c);
-      const response = await createChatCompletions(openAIPayload, clientHeaders);
-
-      if (!isNonStreaming(response)) {
-        return c.json(
-          { error: { code: 500, message: "Unexpected streaming response", status: "INTERNAL_ERROR" } },
-          500
-        );
-      }
-
-      const geminiResponse = translateOpenAIToGemini(response, modelId);
-      logger.debug("generateContent response:", () => JSON.stringify(geminiResponse));
-
-      logUsage({
-        ip: getClientIp(c),
-        model: modelId,
-        endpoint: "gemini",
-        prompt_tokens: response.usage?.prompt_tokens ?? 0,
-        completion_tokens: response.usage?.completion_tokens ?? 0,
-        total_tokens: response.usage?.total_tokens ?? 0,
-        cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-        stream: false,
-        duration_ms: Date.now() - startTime,
-        ttfb_ms: 0,
-      });
-
-      return c.json(geminiResponse, 200);
-    } catch (error) {
-      logger.error("Gemini generateContent failed:", error);
-      return await forwardError(c, error);
     }
-  }
+
+    const geminiResponse = translateOpenAIToGemini(response, modelId);
+    logger.debug("generateContent response:", () => JSON.stringify(geminiResponse));
+    if (response.usage) observation.reportUsage(chatUsage(response.usage));
+
+    return c.json(geminiResponse, 200);
+  })
 );
 
 // POST /models/{model}:streamGenerateContent
 geminiRoutes.post(
   "/:modelWithMethod{.+\\:streamGenerateContent}",
-  async (c) => {
-    try {
-      await checkRateLimit(state);
-      const startTime = Date.now();
+  (c) => observeModelRequest(c, "gemini", async (observation) => {
+    await checkRateLimit(state);
 
-      const { modelWithMethod } = c.req.param();
-      const modelId = modelWithMethod.split(":")[0];
-      const requestBody =
-        await c.req.json<GeminiGenerateContentRequest>();
+    const { modelWithMethod } = c.req.param();
+    const modelId = modelWithMethod.split(":")[0];
+    observation.identify(modelId);
+    const requestBody =
+      await c.req.json<GeminiGenerateContentRequest>();
+    observation.request(modelId, true);
 
-      logger.debug(
-        `streamGenerateContent for model ${modelId}:`,
-        () => JSON.stringify(requestBody)
+    logger.debug(
+      `streamGenerateContent for model ${modelId}:`,
+      () => JSON.stringify(requestBody)
+    );
+
+    const openAIPayload = translateGeminiToOpenAI(modelId, requestBody);
+    openAIPayload.stream = true;
+
+    const clientHeaders = extractClientHeaders(c);
+    const response = await createChatCompletions(openAIPayload, clientHeaders);
+
+    if (isNonStreaming(response)) {
+      // Fallback: return as non-streaming
+      const geminiResponse = translateOpenAIToGemini(
+        response,
+        modelId
       );
-
-      const openAIPayload = translateGeminiToOpenAI(modelId, requestBody);
-      openAIPayload.stream = true;
-
-      const clientHeaders = extractClientHeaders(c);
-      const response = await createChatCompletions(openAIPayload, clientHeaders);
-      const ip = getClientIp(c);
-
-      if (isNonStreaming(response)) {
-        // Fallback: return as non-streaming
-        const geminiResponse = translateOpenAIToGemini(
-          response,
-          modelId
-        );
-        logUsage({
-          ip,
-          model: modelId,
-          endpoint: "gemini",
-          prompt_tokens: response.usage?.prompt_tokens ?? 0,
-          completion_tokens: response.usage?.completion_tokens ?? 0,
-          total_tokens: response.usage?.total_tokens ?? 0,
-          cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-          stream: false,
-          duration_ms: Date.now() - startTime,
-          ttfb_ms: 0,
-        });
-        return c.json(geminiResponse, 200);
-      }
-
-      return streamSSE(c, async (stream) => {
-        let lastUsage: ChatCompletionChunk["usage"] | undefined;
-        let ttfb = 0;
-        for await (const rawEvent of response) {
-          if (!rawEvent.data) continue;
-
-          const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk;
-          if (!ttfb && hasChatOutput(chunk)) ttfb = Date.now() - startTime;
-          if (chunk.usage) lastUsage = chunk.usage;
-          const geminiChunk = translateOpenAIChunkToGemini(chunk, modelId);
-
-          await stream.writeSSE({
-            data: JSON.stringify(geminiChunk),
-          });
-        }
-        logUsage({
-          ip,
-          model: modelId,
-          endpoint: "gemini",
-          prompt_tokens: lastUsage?.prompt_tokens ?? 0,
-          completion_tokens: lastUsage?.completion_tokens ?? 0,
-          total_tokens: lastUsage?.total_tokens ?? 0,
-          cached_prompt_tokens: lastUsage?.prompt_tokens_details?.cached_tokens ?? 0,
-          stream: true,
-          duration_ms: Date.now() - startTime,
-          ttfb_ms: ttfb,
-        });
-      });
-    } catch (error) {
-      logger.error("Gemini streamGenerateContent failed:", error);
-      return await forwardError(c, error);
+      if (response.usage) observation.reportUsage(chatUsage(response.usage));
+      return c.json(geminiResponse, 200);
     }
-  }
+
+    return streamObserved(c, observation, async (stream) => {
+      for await (const rawEvent of response) {
+        if (!rawEvent.data) continue;
+
+        const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk;
+        observation.chatChunk(chunk);
+        const geminiChunk = translateOpenAIChunkToGemini(chunk, modelId);
+
+        await stream.writeSSE({
+          data: JSON.stringify(geminiChunk),
+        });
+      }
+    });
+  })
 );
 
 // POST /models/{model}:countTokens

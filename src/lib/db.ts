@@ -2,26 +2,73 @@ import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlit
 import path from "node:path";
 
 import { logger } from "./logger.js";
-import { calculateUsageCost } from "./pricing.js";
+import type { MetricSample, MetricsWindow } from "./metrics-report.js";
+
+/** How a proxied model request ended. Same vocabulary as llm-proxy's analytics. */
+export type RequestOutcome =
+  /** Completed normally. */
+  | "ok"
+  /** Refused before reaching the upstream (for example an invalid request body). */
+  | "rejected"
+  /** The upstream (or the proxy's rate limiter) answered with an HTTP error. */
+  | "http_error"
+  /** Connection, read or translation failure. */
+  | "upstream_error"
+  /** The upstream sent no response headers in time. */
+  | "timeout"
+  /** The upstream reported a failure inside the stream. */
+  | "stream_error"
+  /** The stream ended without a terminal event. */
+  | "incomplete"
+  /** The client disconnected before the response completed. */
+  | "cancelled";
+
+export interface TokenUsage {
+  /** All input tokens, including cache reads and writes. */
+  input: number;
+  /** All output tokens, including reasoning. */
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** Reasoning tokens counted in `output`. */
+  reasoning: number;
+}
 
 export interface UsageRecord {
   ip: string;
   model: string;
-  endpoint: string; // 'openai' | 'anthropic' | 'gemini' | 'responses'
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-  cached_prompt_tokens?: number;
-  cache_write_prompt_tokens?: number;
+  endpoint: string;
+  status: number;
+  outcome: RequestOutcome;
   stream: boolean;
   duration_ms: number;
-  ttfb_ms: number; // Time to first output token (legacy column name; 0 when unavailable)
+  /** Time to the first visible output of a streamed response; null when not observed. */
+  first_token_ms: number | null;
+  /** null when the upstream did not report usage. */
+  usage: TokenUsage | null;
 }
+
+/**
+ * Columns added after the first release. Existing databases gain them in place,
+ * and older builds keep working because their INSERT names its columns.
+ * Rows written before outcome tracking were only logged for handled responses,
+ * hence the `ok` / 200 / usage-known defaults.
+ */
+const ADDED_COLUMNS: ReadonlyArray<readonly [name: string, definition: string]> = [
+  ["ttfb_ms", "INTEGER NOT NULL DEFAULT 0"],
+  ["cached_prompt_tokens", "INTEGER NOT NULL DEFAULT 0"],
+  ["cache_write_prompt_tokens", "INTEGER NOT NULL DEFAULT 0"],
+  ["usage_known", "INTEGER NOT NULL DEFAULT 1"],
+  ["reasoning_tokens", "INTEGER"],
+  ["status", "INTEGER NOT NULL DEFAULT 200"],
+  ["outcome", "TEXT NOT NULL DEFAULT 'ok'"],
+];
 
 let db: DatabaseSync | null = null;
 let dbPath: string = "";
 let insertStmt: StatementSync | null = null;
 let signalsRegistered = false;
+let droppedRecords = 0;
 
 export function closeDatabase(): void {
   insertStmt = null;
@@ -37,6 +84,24 @@ export function closeDatabase(): void {
     current.close();
   } catch (err) {
     logger.error("Failed to close database:", err);
+  }
+}
+
+function columnNames(database: DatabaseSync): Set<string> {
+  const rows = database.prepare("PRAGMA table_info(usage_logs)").all() as Array<{ name: string }>;
+  return new Set(rows.map((row) => row.name));
+}
+
+function addMissingColumns(database: DatabaseSync): void {
+  const existing = columnNames(database);
+  for (const [name, definition] of ADDED_COLUMNS) {
+    if (existing.has(name)) continue;
+    try {
+      database.exec(`ALTER TABLE usage_logs ADD COLUMN ${name} ${definition}`);
+    } catch (err) {
+      // Another process sharing the file may have added it first.
+      if (!columnNames(database).has(name)) throw err;
+    }
   }
 }
 
@@ -73,32 +138,25 @@ export async function initDatabase(dataDir: string): Promise<void> {
       cache_write_prompt_tokens INTEGER NOT NULL DEFAULT 0,
       stream INTEGER NOT NULL DEFAULT 0,
       duration_ms INTEGER NOT NULL DEFAULT 0,
-      ttfb_ms INTEGER NOT NULL DEFAULT 0
+      ttfb_ms INTEGER NOT NULL DEFAULT 0,
+      usage_known INTEGER NOT NULL DEFAULT 1,
+      reasoning_tokens INTEGER,
+      status INTEGER NOT NULL DEFAULT 200,
+      outcome TEXT NOT NULL DEFAULT 'ok'
     );
 
     CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_logs(timestamp);
     CREATE INDEX IF NOT EXISTS idx_usage_ip ON usage_logs(ip);
     CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model);
   `);
-
-  // Additive migrations keep existing usage databases compatible.
-  for (const column of [
-    "ttfb_ms INTEGER NOT NULL DEFAULT 0",
-    "cached_prompt_tokens INTEGER NOT NULL DEFAULT 0",
-    "cache_write_prompt_tokens INTEGER NOT NULL DEFAULT 0",
-  ]) {
-    try {
-      db.exec(`ALTER TABLE usage_logs ADD COLUMN ${column}`);
-    } catch {
-      // Column already exists.
-    }
-  }
+  addMissingColumns(db);
 
   insertStmt = db.prepare(`
     INSERT INTO usage_logs (
       ip, model, endpoint, prompt_tokens, completion_tokens, total_tokens,
-      cached_prompt_tokens, cache_write_prompt_tokens, stream, duration_ms, ttfb_ms
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      cached_prompt_tokens, cache_write_prompt_tokens, stream, duration_ms, ttfb_ms,
+      usage_known, reasoning_tokens, status, outcome
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   if (!signalsRegistered) {
@@ -123,24 +181,36 @@ export function logUsage(record: UsageRecord): void {
   if (!db || !insertStmt) return;
   setImmediate(() => {
     if (!db || !insertStmt) return;
+    const usage = record.usage;
     try {
       insertStmt.run(
         record.ip,
         record.model,
         record.endpoint,
-        record.prompt_tokens,
-        record.completion_tokens,
-        record.total_tokens,
-        record.cached_prompt_tokens ?? 0,
-        record.cache_write_prompt_tokens ?? 0,
+        usage?.input ?? 0,
+        usage?.output ?? 0,
+        usage ? usage.input + usage.output : 0,
+        usage?.cacheRead ?? 0,
+        usage?.cacheWrite ?? 0,
         record.stream ? 1 : 0,
-        record.duration_ms,
-        record.ttfb_ms
+        Math.max(0, Math.round(record.duration_ms)),
+        // 0 means "not observed"; only streamed responses have a first token.
+        record.stream ? record.first_token_ms ?? 0 : 0,
+        usage ? 1 : 0,
+        usage ? usage.reasoning : null,
+        record.status,
+        record.outcome
       );
     } catch (err) {
+      droppedRecords++;
       logger.error("Failed to log usage:", err);
     }
   });
+}
+
+/** Usage rows that could not be written since the process started. */
+export function droppedUsageRecords(): number {
+  return droppedRecords;
 }
 
 export function getDb(): DatabaseSync {
@@ -148,398 +218,68 @@ export function getDb(): DatabaseSync {
   return db;
 }
 
-/** Query time range parameters */
-export interface TimeRange {
-  start: string; // ISO datetime; timestamps without an offset are interpreted as UTC
-  end: string;
-  granularity?: string; // '1m' | '5m' | '1h' | '1d' — auto-inferred if omitted
-  timezoneOffsetMinutes?: number; // Browser getTimezoneOffset(), used for local chart buckets
+/** File path of the open usage database, for readers on other threads. */
+export function getDatabasePath(): string {
+  if (!db) throw new Error("Database not initialized");
+  return dbPath;
 }
 
-/** Convert an ISO timestamp to the UTC text format stored by SQLite datetime('now'). */
-export function toSqliteUtcTimestamp(value: string): string {
-  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
-  const isoValue = value.includes("T") ? value : value.replace(" ", "T");
-  const parsed = new Date(hasTimezone ? isoValue : `${isoValue}Z`);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new Error(`Invalid timestamp: ${value}`);
-  }
-  return parsed.toISOString().slice(0, 19).replace("T", " ");
+/** SQLite `datetime('now')` text for the first whole second at or after `ms`. */
+function secondAtOrAfter(ms: number): string {
+  return new Date(Math.ceil(ms / 1000) * 1000).toISOString().slice(0, 19).replace("T", " ");
 }
 
-function normalizeTimeRange(range: TimeRange): TimeRange {
-  return {
+export interface MetricSamples {
+  /** Newest first; one row beyond `rowLimit` when more matched, so the report can flag truncation. */
+  samples: Array<MetricSample>;
+  /** Distinct models among the newest `rowLimit` rows of the window, ignoring the model filter. */
+  availableModels: Array<string>;
+  modelListTruncated: boolean;
+}
+
+/**
+ * Rows whose timestamp falls in [from, to). Timestamps have second resolution, so a row
+ * stamped at second S belongs to the window when from <= S * 1000 < to.
+ */
+export function readMetricSamples(
+  window: MetricsWindow,
+  rowLimit: number,
+  modelLimit: number,
+  database: DatabaseSync = getDb()
+): MetricSamples {
+  const range: Array<SQLInputValue> = [secondAtOrAfter(window.from), secondAtOrAfter(window.to)];
+
+  const models = (database.prepare(
+    `SELECT DISTINCT model FROM (
+       SELECT model FROM usage_logs WHERE timestamp >= ? AND timestamp < ?
+       ORDER BY timestamp DESC, id DESC LIMIT ?
+     ) ORDER BY model LIMIT ?`
+  ).all(...range, rowLimit, modelLimit + 1) as Array<{ model: string }>).map((row) => row.model);
+
+  const modelFilter = window.model === undefined ? "" : "AND model = ?";
+  const samples = database.prepare(
+    `SELECT
+       CAST(strftime('%s', timestamp) AS INTEGER) * 1000 AS ts,
+       model, endpoint, status, outcome, duration_ms,
+       CASE WHEN stream = 1 AND ttfb_ms > 0 THEN ttfb_ms END AS first_token_ms,
+       CASE WHEN usage_known THEN prompt_tokens END AS input,
+       CASE WHEN usage_known THEN completion_tokens END AS output,
+       CASE WHEN usage_known THEN cached_prompt_tokens END AS input_cache_read,
+       CASE WHEN usage_known THEN cache_write_prompt_tokens END AS input_cache_write,
+       CASE WHEN usage_known THEN reasoning_tokens END AS reasoning
+     FROM usage_logs
+     WHERE timestamp >= ? AND timestamp < ? ${modelFilter}
+     ORDER BY timestamp DESC, id DESC
+     LIMIT ?`
+  ).all(
     ...range,
-    start: toSqliteUtcTimestamp(range.start),
-    end: toSqliteUtcTimestamp(range.end),
-  };
-}
-
-/** Convert a preset period string to a TimeRange (end = now). */
-export function periodToTimeRange(period: string): TimeRange {
-  const hours: Record<string, number> = {
-    "1h": 1,
-    "6h": 6,
-    "24h": 24,
-    "7d": 168,
-    "30d": 720,
-  };
-  const h = hours[period] ?? 24;
-  const now = new Date();
-  const start = new Date(now.getTime() - h * 3600_000);
-  return {
-    start: toSqliteUtcTimestamp(start.toISOString()),
-    end: toSqliteUtcTimestamp(now.toISOString()),
-  };
-}
-
-/** Infer granularity from time range span */
-function inferGranularity(start: string, end: string): string {
-  const spanMs = new Date(toSqliteUtcTimestamp(end) + "Z").getTime()
-    - new Date(toSqliteUtcTimestamp(start) + "Z").getTime();
-  const spanHours = spanMs / 3600_000;
-  if (spanHours <= 3) return "1m";
-  if (spanHours <= 24) return "5m";
-  if (spanHours <= 168) return "1h"; // 7 days
-  return "1d";
-}
-
-/** Get strftime format string from granularity */
-function granularityToStrftime(granularity: string): string {
-  switch (granularity) {
-    case "1m":
-      return "%Y-%m-%d %H:%M";
-    case "5m":
-      // SQLite doesn't have native 5-min bucketing, we'll handle in query
-      return "%Y-%m-%d %H:%M";
-    case "1h":
-      return "%Y-%m-%d %H:00";
-    case "1d":
-      return "%Y-%m-%d";
-    default:
-      return "%Y-%m-%d %H:00";
-  }
-}
-
-/** Resolve granularity (use provided or auto-infer) */
-function resolveGranularity(range: TimeRange): string {
-  return range.granularity || inferGranularity(range.start, range.end);
-}
-
-function timezoneModifier(range: TimeRange): string {
-  const offset = Math.max(-840, Math.min(840, Math.trunc(range.timezoneOffsetMinutes ?? 0)));
-  return `${-offset} minutes`;
-}
-
-function queryAll<T>(sql: string, params: SQLInputValue[] = []): T[] {
-  const d = getDb();
-  const stmt = d.prepare(sql);
-  return (stmt.all(...params) as Array<Record<string, unknown>>).map((row) => ({ ...row }) as T);
-}
-
-function queryOne<T>(sql: string, params: SQLInputValue[] = []): T {
-  const d = getDb();
-  const stmt = d.prepare(sql);
-  const row = stmt.get(...params) as Record<string, unknown> | undefined;
-  return (row ? { ...row } : {}) as T;
-}
-
-export interface StatsOverview {
-  total_requests: number;
-  total_prompt_tokens: number;
-  total_completion_tokens: number;
-  total_cached_prompt_tokens: number;
-  total_cache_write_prompt_tokens: number;
-  total_tokens: number;
-  total_credits: number;
-  total_cost_usd: number;
-  unpriced_tokens: number;
-  active_ips: number;
-  avg_ttfb_ms: number;
-  avg_duration_ms: number;
-  p50_ttfb_ms: number;
-  p95_ttfb_ms: number;
-  p50_duration_ms: number;
-  p95_duration_ms: number;
-}
-
-export function getStatsOverview(range: TimeRange): StatsOverview {
-  const { start, end } = normalizeTimeRange(range);
-  const whereClause = `timestamp >= ? AND timestamp <= ?`;
-  const whereParams = [start, end];
-
-  const base = queryOne<{
-    total_requests: number;
-    total_prompt_tokens: number;
-    total_completion_tokens: number;
-    total_cached_prompt_tokens: number;
-    total_cache_write_prompt_tokens: number;
-    total_tokens: number;
-    active_ips: number;
-    avg_ttfb_ms: number;
-    avg_duration_ms: number;
-  }>(
-    `SELECT
-      COUNT(*) as total_requests,
-      COALESCE(SUM(prompt_tokens), 0) as total_prompt_tokens,
-      COALESCE(SUM(completion_tokens), 0) as total_completion_tokens,
-      COALESCE(SUM(cached_prompt_tokens), 0) as total_cached_prompt_tokens,
-      COALESCE(SUM(cache_write_prompt_tokens), 0) as total_cache_write_prompt_tokens,
-      COALESCE(SUM(total_tokens), 0) as total_tokens,
-      COUNT(DISTINCT ip) as active_ips,
-      COALESCE(AVG(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
-      COALESCE(AVG(duration_ms), 0) as avg_duration_ms
-    FROM usage_logs
-    WHERE ${whereClause}`,
-    whereParams
-  );
-
-  // Compute percentiles via sorted subqueries
-  const ttfbPercentiles = queryOne<{ p50: number; p95: number }>(
-    `SELECT
-      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE ${whereClause} AND stream = 1 AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause} AND stream = 1 AND ttfb_ms > 0)), 0) as p50,
-      COALESCE((SELECT ttfb_ms FROM usage_logs WHERE ${whereClause} AND stream = 1 AND ttfb_ms > 0 ORDER BY ttfb_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause} AND stream = 1 AND ttfb_ms > 0)), 0) as p95`,
-    [...whereParams, ...whereParams, ...whereParams, ...whereParams]
-  );
-
-  const durationPercentiles = queryOne<{ p50: number; p95: number }>(
-    `SELECT
-      COALESCE((SELECT duration_ms FROM usage_logs WHERE ${whereClause} ORDER BY duration_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.5 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause})), 0) as p50,
-      COALESCE((SELECT duration_ms FROM usage_logs WHERE ${whereClause} ORDER BY duration_ms LIMIT 1 OFFSET (SELECT MAX(0, CAST(COUNT(*) * 0.95 AS INTEGER) - 1) FROM usage_logs WHERE ${whereClause})), 0) as p95`,
-    [...whereParams, ...whereParams, ...whereParams, ...whereParams]
-  );
-
-  const modelUsage = queryAll<{
-    model: string;
-    prompt_tokens: number;
-    completion_tokens: number;
-    cached_prompt_tokens: number;
-    cache_write_prompt_tokens: number;
-    total_tokens: number;
-  }>(
-    `SELECT model,
-      COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-      COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-      COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
-      COALESCE(SUM(cache_write_prompt_tokens), 0) as cache_write_prompt_tokens,
-      COALESCE(SUM(total_tokens), 0) as total_tokens
-    FROM usage_logs WHERE ${whereClause} GROUP BY model`,
-    whereParams
-  );
-  let totalCredits = 0;
-  let unpricedTokens = 0;
-  for (const usage of modelUsage) {
-    const cost = calculateUsageCost(usage.model, usage);
-    if (cost.priced) totalCredits += cost.credits;
-    else unpricedTokens += usage.total_tokens;
-  }
+    ...(window.model === undefined ? [] : [window.model]),
+    rowLimit + 1
+  ) as unknown as Array<MetricSample>;
 
   return {
-    ...base,
-    total_credits: totalCredits,
-    total_cost_usd: totalCredits * 0.01,
-    unpriced_tokens: unpricedTokens,
-    p50_ttfb_ms: ttfbPercentiles.p50,
-    p95_ttfb_ms: ttfbPercentiles.p95,
-    p50_duration_ms: durationPercentiles.p50,
-    p95_duration_ms: durationPercentiles.p95,
+    samples,
+    availableModels: models.slice(0, modelLimit),
+    modelListTruncated: models.length > modelLimit,
   };
-}
-
-export interface TimeSeriesPoint {
-  time_bucket: string;
-  requests: number;
-  prompt_tokens: number;
-  completion_tokens: number;
-  cached_prompt_tokens: number;
-  cache_write_prompt_tokens: number;
-  total_tokens: number;
-  avg_ttfb_ms: number;
-  avg_duration_ms: number;
-}
-
-export function getTimeSeries(range: TimeRange): TimeSeriesPoint[] {
-  const normalizedRange = normalizeTimeRange(range);
-  const { start, end } = normalizedRange;
-  const granularity = resolveGranularity(normalizedRange);
-  const strftime = granularityToStrftime(granularity);
-  const tzModifier = timezoneModifier(normalizedRange);
-
-  if (granularity === "5m") {
-    // 5-minute bucketing: truncate minutes to nearest 5
-    return queryAll<TimeSeriesPoint>(
-      `SELECT
-        strftime('%Y-%m-%d %H:', timestamp, ?) || printf('%02d', (CAST(strftime('%M', timestamp, ?) AS INTEGER) / 5) * 5) as time_bucket,
-        COUNT(*) as requests,
-        COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-        COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-        COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
-        COALESCE(SUM(cache_write_prompt_tokens), 0) as cache_write_prompt_tokens,
-        COALESCE(SUM(total_tokens), 0) as total_tokens,
-        COALESCE(AVG(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
-        COALESCE(AVG(duration_ms), 0) as avg_duration_ms
-      FROM usage_logs
-      WHERE timestamp >= ? AND timestamp <= ?
-      GROUP BY time_bucket
-      ORDER BY time_bucket`,
-      [tzModifier, tzModifier, start, end]
-    );
-  }
-
-  return queryAll<TimeSeriesPoint>(
-    `SELECT
-      strftime('${strftime}', timestamp, ?) as time_bucket,
-      COUNT(*) as requests,
-      COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-      COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-      COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
-      COALESCE(SUM(cache_write_prompt_tokens), 0) as cache_write_prompt_tokens,
-      COALESCE(SUM(total_tokens), 0) as total_tokens,
-      COALESCE(AVG(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
-      COALESCE(AVG(duration_ms), 0) as avg_duration_ms
-    FROM usage_logs
-    WHERE timestamp >= ? AND timestamp <= ?
-    GROUP BY time_bucket
-    ORDER BY time_bucket`,
-    [tzModifier, start, end]
-  );
-}
-
-export interface TopEntry {
-  name: string;
-  requests: number;
-  prompt_tokens: number;
-  completion_tokens: number;
-  cached_prompt_tokens: number;
-  cache_write_prompt_tokens: number;
-  total_tokens: number;
-  credits?: number | null;
-  cost_usd?: number | null;
-  avg_ttfb_ms: number;
-  ttfb_samples?: number;
-  p50_ttfb_ms?: number;
-  p95_ttfb_ms?: number;
-  avg_duration_ms: number;
-}
-
-interface TopIpModelEntry extends TopEntry {
-  model: string;
-}
-
-export function getTopIps(range: TimeRange, limit = 20): TopEntry[] {
-  const { start, end } = normalizeTimeRange(range);
-  // Pricing is model-specific. Grouping directly by IP would apply the wrong rate
-  // when one client uses multiple models.
-  const rows = queryAll<TopIpModelEntry>(
-    `SELECT
-      ip as name,
-      model,
-      COUNT(*) as requests,
-      COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-      COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-      COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
-      COALESCE(SUM(cache_write_prompt_tokens), 0) as cache_write_prompt_tokens,
-      COALESCE(SUM(total_tokens), 0) as total_tokens,
-      0 as avg_ttfb_ms,
-      0 as avg_duration_ms
-    FROM usage_logs
-    WHERE timestamp >= ? AND timestamp <= ?
-    GROUP BY ip, model`,
-    [start, end]
-  );
-
-  const byIp = new Map<string, TopEntry>();
-  for (const row of rows) {
-    const entry = byIp.get(row.name) ?? {
-      name: row.name,
-      requests: 0,
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      cached_prompt_tokens: 0,
-      cache_write_prompt_tokens: 0,
-      total_tokens: 0,
-      credits: 0,
-      cost_usd: 0,
-      avg_ttfb_ms: 0,
-      avg_duration_ms: 0,
-    };
-    const cost = calculateUsageCost(row.model, row);
-    entry.requests += row.requests;
-    entry.prompt_tokens += row.prompt_tokens;
-    entry.completion_tokens += row.completion_tokens;
-    entry.cached_prompt_tokens += row.cached_prompt_tokens;
-    entry.cache_write_prompt_tokens += row.cache_write_prompt_tokens;
-    entry.total_tokens += row.total_tokens;
-    entry.credits = cost.priced && entry.credits !== null
-      ? (entry.credits ?? 0) + cost.credits
-      : null;
-    entry.cost_usd = cost.priced && entry.cost_usd !== null
-      ? (entry.cost_usd ?? 0) + cost.usd
-      : null;
-    byIp.set(row.name, entry);
-  }
-
-  return [...byIp.values()]
-    .sort((a, b) => b.total_tokens - a.total_tokens)
-    .slice(0, limit);
-}
-
-export function getTopModels(range: TimeRange, limit = 20): TopEntry[] {
-  const { start, end } = normalizeTimeRange(range);
-  const rows = queryAll<TopEntry>(
-    `SELECT
-      model as name,
-      COUNT(*) as requests,
-      COUNT(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN 1 END) as ttfb_samples,
-      COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-      COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-      COALESCE(SUM(cached_prompt_tokens), 0) as cached_prompt_tokens,
-      COALESCE(SUM(cache_write_prompt_tokens), 0) as cache_write_prompt_tokens,
-      COALESCE(SUM(total_tokens), 0) as total_tokens,
-      COALESCE(AVG(CASE WHEN stream = 1 AND ttfb_ms > 0 THEN ttfb_ms END), 0) as avg_ttfb_ms,
-      COALESCE(AVG(duration_ms), 0) as avg_duration_ms
-    FROM usage_logs
-    WHERE timestamp >= ? AND timestamp <= ?
-    GROUP BY model
-    ORDER BY total_tokens DESC
-    LIMIT ?`,
-    [start, end, limit]
-  );
-
-  const modelNames = rows.map((row) => row.name);
-  const percentiles = modelNames.length
-    ? queryAll<{ model: string; p50_ttfb_ms: number; p95_ttfb_ms: number }>(
-        `WITH ranked AS (
-          SELECT
-            model,
-            ttfb_ms,
-            ROW_NUMBER() OVER (PARTITION BY model ORDER BY ttfb_ms) as row_num,
-            COUNT(*) OVER (PARTITION BY model) as sample_count
-          FROM usage_logs
-          WHERE timestamp >= ? AND timestamp <= ?
-            AND stream = 1 AND ttfb_ms > 0
-            AND model IN (${modelNames.map(() => "?").join(", ")})
-        )
-        SELECT
-          model,
-          MAX(CASE WHEN row_num = CAST((sample_count * 50 + 99) / 100 AS INTEGER) THEN ttfb_ms END) as p50_ttfb_ms,
-          MAX(CASE WHEN row_num = CAST((sample_count * 95 + 99) / 100 AS INTEGER) THEN ttfb_ms END) as p95_ttfb_ms
-        FROM ranked
-        GROUP BY model`,
-        [start, end, ...modelNames]
-      )
-    : [];
-  const percentileByModel = new Map(percentiles.map((row) => [row.model, row]));
-
-  return rows.map((row) => {
-    const cost = calculateUsageCost(row.name, row);
-    const percentile = percentileByModel.get(row.name);
-    return {
-      ...row,
-      p50_ttfb_ms: percentile?.p50_ttfb_ms ?? 0,
-      p95_ttfb_ms: percentile?.p95_ttfb_ms ?? 0,
-      credits: cost.priced ? cost.credits : null,
-      cost_usd: cost.priced ? cost.usd : null,
-    };
-  });
 }

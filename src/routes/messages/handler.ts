@@ -1,13 +1,14 @@
 import type { Context } from "hono";
-import { streamSSE } from "hono/streaming";
 
 import { logger } from "../../lib/logger.js";
 import { state } from "../../lib/state.js";
 import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
-import { logUsage } from "../../lib/db.js";
-import { getClientIp } from "../../lib/ip.js";
-import { hasChatOutput } from "../../lib/latency.js";
+import {
+  chatUsage,
+  streamObserved,
+  type RequestObservation,
+} from "../../lib/request-observation.js";
 import { createChatCompletions } from "../../services/copilot-completions.js";
 import {
   createDeepseekCompletion,
@@ -27,16 +28,16 @@ import {
 } from "./non-stream-translation.js";
 import { translateChunkToAnthropicEvents } from "./stream-translation.js";
 
-export async function handleMessagesCompletion(c: Context) {
+export async function handleMessagesCompletion(c: Context, observation: RequestObservation) {
   await checkRateLimit(state);
-  const startTime = Date.now();
 
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>();
+  observation.request(anthropicPayload.model, anthropicPayload.stream === true);
   logger.debug("Anthropic request payload:", () => JSON.stringify(anthropicPayload));
 
   // Route DeepSeek models directly (DeepSeek uses Anthropic-compatible API)
   if (isDeepseekModel(anthropicPayload.model)) {
-    return handleDeepseekCompletion(c, anthropicPayload, startTime);
+    return handleDeepseekCompletion(anthropicPayload, observation);
   }
 
   const openAIPayload = translateToOpenAI(anthropicPayload);
@@ -44,43 +45,28 @@ export async function handleMessagesCompletion(c: Context) {
 
   const clientHeaders = extractClientHeaders(c);
   const response = await createChatCompletions(openAIPayload, clientHeaders);
-  const ip = getClientIp(c);
 
   if (isNonStreaming(response)) {
     logger.debug("Non-streaming response from Copilot");
     const anthropicResponse = translateToAnthropic(response);
-    logUsage({
-      ip,
-      model: anthropicPayload.model,
-      endpoint: "anthropic",
-      prompt_tokens: response.usage?.prompt_tokens ?? 0,
-      completion_tokens: response.usage?.completion_tokens ?? 0,
-      total_tokens: response.usage?.total_tokens ?? 0,
-      cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-      stream: false,
-      duration_ms: Date.now() - startTime,
-      ttfb_ms: 0,
-    });
+    if (response.usage) observation.reportUsage(chatUsage(response.usage));
     return c.json(anthropicResponse);
   }
 
   logger.debug("Streaming response from Copilot");
-  return streamSSE(c, async (stream) => {
+  return streamObserved(c, observation, async (stream) => {
     const streamState: AnthropicStreamState = {
       messageStartSent: false,
       contentBlockIndex: 0,
       contentBlockOpen: false,
       toolCalls: {},
     };
-    let lastUsage: ChatCompletionChunk["usage"] | undefined;
-    let ttfb = 0;
 
     for await (const rawEvent of response) {
       if (!rawEvent.data) continue;
 
       const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk;
-      if (!ttfb && hasChatOutput(chunk)) ttfb = Date.now() - startTime;
-      if (chunk.usage) lastUsage = chunk.usage;
+      observation.chatChunk(chunk);
       const events = translateChunkToAnthropicEvents(chunk, streamState);
 
       for (const event of events) {
@@ -90,19 +76,6 @@ export async function handleMessagesCompletion(c: Context) {
         });
       }
     }
-
-    logUsage({
-      ip,
-      model: anthropicPayload.model,
-      endpoint: "anthropic",
-      prompt_tokens: lastUsage?.prompt_tokens ?? 0,
-      completion_tokens: lastUsage?.completion_tokens ?? 0,
-      total_tokens: lastUsage?.total_tokens ?? 0,
-      cached_prompt_tokens: lastUsage?.prompt_tokens_details?.cached_tokens ?? 0,
-      stream: true,
-      duration_ms: Date.now() - startTime,
-      ttfb_ms: ttfb,
-    });
   });
 }
 
@@ -112,27 +85,18 @@ export async function handleMessagesCompletion(c: Context) {
  * as-is without any Anthropic ↔ OpenAI translation.
  */
 async function handleDeepseekCompletion(
-  c: Context,
   anthropicPayload: AnthropicMessagesPayload,
-  startTime: number
+  observation: RequestObservation
 ) {
+  // Set first so failures to reach DeepSeek are attributed to it too.
+  observation.endpoint = "deepseek-messages";
   const response = await createDeepseekCompletion(
     "/v1/messages",
     anthropicPayload as unknown as Record<string, unknown>
   );
 
-  logUsage({
-    ip: getClientIp(c),
-    model: anthropicPayload.model,
-    endpoint: "deepseek-messages",
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
-    stream: Boolean(anthropicPayload.stream),
-    duration_ms: Date.now() - startTime,
-    ttfb_ms: 0,
-  });
-
+  // The body is relayed untouched, so usage is unknown and timing ends at the upstream headers.
+  observation.finish(response.ok ? "ok" : "http_error", response.status);
   return response;
 }
 

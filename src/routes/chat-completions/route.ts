@@ -1,14 +1,10 @@
 import { Hono } from "hono";
 
-import { forwardError } from "../../lib/error.js";
+import { observeModelRequest } from "../../lib/request-observation.js";
 import { handleChatCompletion } from "./handler.js";
 
 export const completionRoutes = new Hono();
 
-completionRoutes.post("/", async (c) => {
-  try {
-    return await handleChatCompletion(c);
-  } catch (error) {
-    return await forwardError(c, error);
-  }
-});
+completionRoutes.post("/", (c) =>
+  observeModelRequest(c, "openai", (observation) => handleChatCompletion(c, observation))
+);
