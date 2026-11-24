@@ -266,8 +266,8 @@ for (const [version, method] of [["v1", "streamGenerateContent?alt=sse"], ["v1be
         })) },
         ...calls.map(({ id }, i) => ({ role: "tool", tool_call_id: id, content: JSON.stringify(results[i]) })),
         { role: "user", content: [
-          { type: "text", text: "Images from a tool result:" }, imagePart,
-          { type: "text", text: "Images from a tool result:" }, otherImagePart, imagePart,
+          { type: "text", text: "Images from tool result 1 of 3:" }, imagePart,
+          { type: "text", text: "Images from tool result 3 of 3:" }, otherImagePart, imagePart,
         ] },
         { role: "user", content: [{ type: "text", text: "Compare the screenshots with this reference." }, otherImagePart] },
       ]);
@@ -318,7 +318,7 @@ test("Gemini ignores invalid and non-inline attachments without interpreting opa
     assert.equal(new Headers(init?.headers).has("copilot-vision-request"), hasImage);
     assert.deepEqual(payload.messages.slice(1), [
       { role: "tool", tool_call_id: "call_view", content: JSON.stringify(result) },
-      ...(hasImage ? [{ role: "user", content: [{ type: "text", text: "Images from a tool result:" }, imagePart] }] : []),
+      ...(hasImage ? [{ role: "user", content: [{ type: "text", text: "Images from tool result 1 of 1:" }, imagePart] }] : []),
     ]);
     return Response.json({ choices: [{ index: 0, message: { content: "OK" }, finish_reason: "stop" }] });
   });

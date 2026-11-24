@@ -49,12 +49,16 @@ export function translateGeminiToOpenAI(
   // Keep consecutive tool results together. Chat Completions expects every
   // tool message in the batch before any user message (including attachments).
   const readToolImage = toolImageReader();
-  let attachments: ContentPart[] = [];
+  let attachments: { resultIndex: number; images: ContentPart[] }[] = [];
+  let resultCount = 0;
   let followUps: Message[] = [];
   const flushToolImagesAndInput = () => {
-    if (attachments.length > 0) messages.push({ role: "user", content: attachments });
+    if (attachments.length > 0) messages.push({ role: "user", content: attachments.flatMap(({ resultIndex, images }): ContentPart[] => [
+      { type: "text", text: `Images from tool result ${resultIndex} of ${resultCount}:` }, ...images,
+    ]) });
     messages.push(...followUps);
     attachments = [];
+    resultCount = 0;
     followUps = [];
   };
   for (const content of request.contents ?? []) {
@@ -69,17 +73,15 @@ export function translateGeminiToOpenAI(
     for (const { functionResponse } of responses) {
       const id = functionResponse.id || functionResponse.name;
       messages.push({ role: "tool", tool_call_id: id, content: JSON.stringify(functionResponse.response) });
+      resultCount++;
       if (!Array.isArray(functionResponse.parts)) continue;
-      let labeled = false;
+      const images: ContentPart[] = [];
       for (const part of functionResponse.parts) {
         const image = readToolImage(part);
         if (!image) continue;
-        if (!labeled) {
-          attachments.push({ type: "text", text: "Images from a tool result:" });
-          labeled = true;
-        }
-        attachments.push(image);
+        images.push(image);
       }
+      if (images.length > 0) attachments.push({ resultIndex: resultCount, images });
     }
     // Gemini may combine tool results and follow-up user input in one content.
     const userInput = content.parts.filter((part) => "text" in part || "inlineData" in part);
