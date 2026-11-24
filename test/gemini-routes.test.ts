@@ -279,11 +279,11 @@ for (const [version, method] of [["v1", "streamGenerateContent?alt=sse"], ["v1be
     const response = await geminiRequest(version, method, { "x-goog-api-key": proxyKey }, { contents: [
       { role: "user", parts: [{ text: "Inspect the screenshots and read notes.txt." }] },
       { role: "model", parts: [{ text: "Checking." }, ...calls.map((functionCall) => ({ functionCall }))] },
-      { role: "user", parts: [{ functionResponse: { ...view, parts: [image] } }] },
       { role: "user", parts: [
-        { functionResponse: read }, { functionResponse: { ...thumb, parts: [otherImage, image] } },
+        { functionResponse: { ...view, parts: [image] } },
         { text: "Compare the screenshots with this reference." }, otherImage,
       ] },
+      { role: "user", parts: [{ functionResponse: read }, { functionResponse: { ...thumb, parts: [otherImage, image] } }] },
     ] });
     assert.equal(response.status, 200);
     assert.match(await response.text(), /"text":"Compared\."/);
