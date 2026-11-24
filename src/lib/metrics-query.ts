@@ -68,8 +68,12 @@ export function queryMetricsReport(window: MetricsWindow): Promise<MetricsReport
   };
   const current = (worker ??= startWorker());
   return new Promise((resolve, reject) => {
-    // Terminating emits "exit", which rejects this request and clears the slot.
-    const timer = setTimeout(() => void current.terminate(), REPORT_TIMEOUT_MS);
+    // Terminating emits "exit", which rejects this request and clears the slot. Drop the
+    // reference now so a request arriving before "exit" starts a fresh worker.
+    const timer = setTimeout(() => {
+      if (worker === current) worker = null;
+      void current.terminate();
+    }, REPORT_TIMEOUT_MS);
     timer.unref();
     pending = { resolve, reject, timer };
     // Keep the process alive until the pending report is delivered.

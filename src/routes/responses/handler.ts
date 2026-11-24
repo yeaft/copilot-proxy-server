@@ -28,13 +28,14 @@ export async function handleResponses(c: Context, observation: RequestObservatio
   logger.debug("Responses API request:", () => JSON.stringify(payload).slice(-400));
 
   if (isDeepseekModel(payload.model)) {
+    // Set first so failures to reach DeepSeek are attributed to it too.
+    observation.endpoint = "deepseek-responses";
     const response = await createDeepseekCompletion(
       "/v1/responses",
       payload as unknown as Record<string, unknown>
     );
 
     // The body is relayed untouched, so usage is unknown and timing ends at the upstream headers.
-    observation.endpoint = "deepseek-responses";
     observation.finish(response.ok ? "ok" : "http_error", response.status);
     return response;
   }

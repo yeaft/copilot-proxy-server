@@ -88,13 +88,14 @@ async function handleDeepseekCompletion(
   anthropicPayload: AnthropicMessagesPayload,
   observation: RequestObservation
 ) {
+  // Set first so failures to reach DeepSeek are attributed to it too.
+  observation.endpoint = "deepseek-messages";
   const response = await createDeepseekCompletion(
     "/v1/messages",
     anthropicPayload as unknown as Record<string, unknown>
   );
 
   // The body is relayed untouched, so usage is unknown and timing ends at the upstream headers.
-  observation.endpoint = "deepseek-messages";
   observation.finish(response.ok ? "ok" : "http_error", response.status);
   return response;
 }

@@ -32,6 +32,7 @@ geminiRoutes.post(
 
     const { modelWithMethod } = c.req.param();
     const modelId = modelWithMethod.split(":")[0];
+    observation.identify(modelId);
     const requestBody =
       await c.req.json<GeminiGenerateContentRequest>();
     observation.request(modelId, false);
@@ -70,6 +71,7 @@ geminiRoutes.post(
 
     const { modelWithMethod } = c.req.param();
     const modelId = modelWithMethod.split(":")[0];
+    observation.identify(modelId);
     const requestBody =
       await c.req.json<GeminiGenerateContentRequest>();
     observation.request(modelId, true);

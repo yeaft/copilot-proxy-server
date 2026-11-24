@@ -173,13 +173,14 @@ async function handleDeepseekChatCompletion(
   payload: ChatCompletionsPayload,
   observation: RequestObservation
 ) {
+  // Set first so failures to reach DeepSeek are attributed to it too.
+  observation.endpoint = "deepseek-chat-completions";
   const response = await createDeepseekCompletion(
     "/v1/chat/completions",
     payload as unknown as Record<string, unknown>
   );
 
   // The body is relayed untouched, so usage is unknown and timing ends at the upstream headers.
-  observation.endpoint = "deepseek-chat-completions";
   observation.finish(response.ok ? "ok" : "http_error", response.status);
   return response;
 }

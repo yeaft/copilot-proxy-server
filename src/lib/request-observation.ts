@@ -67,9 +67,14 @@ export class RequestObservation {
     this.endpoint = endpoint;
   }
 
+  /** Record the model before the body is parsed (Gemini names it in the URL). */
+  identify(model: unknown): void {
+    if (typeof model === "string" && model) this.model = model;
+  }
+
   /** Call once the request body is parsed; failures before this count as rejected requests. */
   request(model: unknown, stream: boolean): void {
-    if (typeof model === "string" && model) this.model = model;
+    this.identify(model);
     this.stream = stream;
     this.parsed = true;
   }

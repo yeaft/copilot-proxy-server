@@ -259,6 +259,28 @@ test("a client that disconnects mid-stream is recorded as cancelled", async (t) 
   assert.deepEqual([row.outcome, row.status, row.prompt_tokens], ["cancelled", 499, 100]);
 });
 
+test("DeepSeek passthrough and Gemini failures keep their endpoint and model", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => new Response("slow down", { status: 429 }));
+  state.deepseekApiKey = "test-deepseek-key";
+  try {
+    assert.equal((await chat({ model: "deepseek-chat" })).status, 429);
+    delete state.deepseekApiKey;
+    // Failing before DeepSeek answers (no key) is still attributed to DeepSeek.
+    assert.equal((await post("/v1/messages", { model: "deepseek-chat", max_tokens: 5, messages: [{ role: "user", content: "hi" }] })).status, 500);
+  } finally {
+    delete state.deepseekApiKey;
+  }
+  // The Gemini model comes from the URL, so an invalid body still names it.
+  assert.equal((await post("/v1beta/models/gemini-4-carbon:generateContent", "{")).status, 500);
+
+  const recorded = (await waitForRows(3)).map((row) => [row.endpoint, row.model, row.status, row.outcome, row.usage_known]);
+  assert.deepEqual(recorded, [
+    ["deepseek-chat-completions", "deepseek-chat", 429, "http_error", 0],
+    ["deepseek-messages", "deepseek-chat", 500, "upstream_error", 0],
+    ["gemini", "gemini-4-carbon", 500, "rejected", 0],
+  ]);
+});
+
 test("unauthenticated requests and token counting are not recorded", async (t) => {
   const upstream = t.mock.method(globalThis, "fetch", async () => Response.json({}));
   assert.equal((await post("/v1/chat/completions", { model: "x", messages: [] }, {})).status, 401);
