@@ -1,29 +1,30 @@
 import type { Context } from "hono";
-import { streamSSE } from "hono/streaming";
 
 import { logger } from "../../lib/logger.js";
 import { state } from "../../lib/state.js";
 import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
-import { logUsage } from "../../lib/db.js";
-import { getClientIp } from "../../lib/ip.js";
-import { hasResponsesOutput } from "../../lib/latency.js";
+import {
+  parseEventData,
+  responsesUsage,
+  streamObserved,
+  type RequestObservation,
+} from "../../lib/request-observation.js";
 import { createResponses } from "../../services/copilot-completions.js";
 import type {
   ResponsesPayload,
   ResponsesResult,
-  ResponseStreamEvent,
 } from "../../types/responses.js";
 import {
   createDeepseekCompletion,
   isDeepseekModel,
 } from "../../services/deepseek-completions.js";
 
-export async function handleResponses(c: Context) {
+export async function handleResponses(c: Context, observation: RequestObservation) {
   await checkRateLimit(state);
-  const startTime = Date.now();
 
   const payload = await c.req.json<ResponsesPayload>();
+  observation.request(payload.model, payload.stream === true);
   logger.debug("Responses API request:", () => JSON.stringify(payload).slice(-400));
 
   if (isDeepseekModel(payload.model)) {
@@ -32,81 +33,34 @@ export async function handleResponses(c: Context) {
       payload as unknown as Record<string, unknown>
     );
 
-    logUsage({
-      ip: getClientIp(c),
-      model: payload.model,
-      endpoint: "deepseek-responses",
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0,
-      stream: Boolean(payload.stream),
-      duration_ms: Date.now() - startTime,
-      ttfb_ms: 0,
-    });
-
+    // The body is relayed untouched, so usage is unknown and timing ends at the upstream headers.
+    observation.endpoint = "deepseek-responses";
+    observation.finish(response.ok ? "ok" : "http_error", response.status);
     return response;
   }
 
   const clientHeaders = extractClientHeaders(c);
   const response = await createResponses(payload, clientHeaders);
-  const ip = getClientIp(c);
 
   // Non-streaming: response is a ResponsesResult object
   if (isNonStreamingResult(response)) {
     logger.debug("Non-streaming responses result");
-    logUsage({
-      ip,
-      model: payload.model,
-      endpoint: "responses",
-      prompt_tokens: response.usage?.input_tokens ?? 0,
-      completion_tokens: response.usage?.output_tokens ?? 0,
-      total_tokens: response.usage?.total_tokens ?? 0,
-      cached_prompt_tokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
-      cache_write_prompt_tokens: response.usage?.input_tokens_details?.cache_write_tokens ?? 0,
-      stream: false,
-      duration_ms: Date.now() - startTime,
-      ttfb_ms: 0,
-    });
+    if (response.usage) observation.reportUsage(responsesUsage(response.usage));
     return c.json(response);
   }
 
   // Streaming: forward SSE events directly
   logger.debug("Streaming responses result");
-  return streamSSE(c, async (stream) => {
-    let lastUsage: ResponsesResult["usage"] | undefined;
-    let ttfb = 0;
-
+  return streamObserved(c, observation, async (stream) => {
     for await (const sse of response) {
-      // Track the first output delta and usage from response.completed.
-      try {
-        const parsed = JSON.parse(sse.data) as ResponseStreamEvent;
-        if (!ttfb && hasResponsesOutput(sse.event, parsed.delta)) {
-          ttfb = Date.now() - startTime;
-        }
-        if (parsed.response?.usage) {
-          lastUsage = parsed.response.usage;
-        }
-      } catch { /* ignore */ }
+      // Track the first output delta, usage from the terminal event, and how the stream ended.
+      observation.responsesEvent(sse.event, parseEventData(sse.data));
 
       await stream.writeSSE({
         event: sse.event,
         data: sse.data,
       });
     }
-
-    logUsage({
-      ip,
-      model: payload.model,
-      endpoint: "responses",
-      prompt_tokens: lastUsage?.input_tokens ?? 0,
-      completion_tokens: lastUsage?.output_tokens ?? 0,
-      total_tokens: lastUsage?.total_tokens ?? 0,
-      cached_prompt_tokens: lastUsage?.input_tokens_details?.cached_tokens ?? 0,
-      cache_write_prompt_tokens: lastUsage?.input_tokens_details?.cache_write_tokens ?? 0,
-      stream: true,
-      duration_ms: Date.now() - startTime,
-      ttfb_ms: ttfb,
-    });
   });
 }
 

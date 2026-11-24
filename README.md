@@ -10,8 +10,8 @@ Run on any server (including headless machines without GUI) via Docker — no VS
 - **Automatic format translation** — Messages and Gemini-style requests are transparently converted to the Copilot wire format
 - **Streaming support** — Full SSE streaming for all API formats
 - **Token management** — Automatic Copilot token refresh, no manual intervention needed
-- **Usage tracking** — Built-in SQLite database tracks requests, tokens, and usage per IP/model
-- **Dashboard** — Web-based usage analytics dashboard with charts
+- **Usage tracking** — Built-in SQLite database records every model request: outcome (including failures and cancellations), latency, first token, and token usage per model
+- **Dashboard** — Analytics dashboard with llm-proxy's design and metrics, behind a sign-in page
 - **Rate limiting** — Optional per-request rate limiting
 - **API key authentication** — Optional API key protection with timing-safe comparison
 - **Docker ready** — Multi-stage Dockerfile with health checks
@@ -107,8 +107,8 @@ docker run -d \
 | `VERBOSE` | `false` | Enable verbose debug logging |
 | `VSCODE_VERSION` | `1.109.2` | VS Code version to emulate in request headers |
 | `RATE_LIMIT_SECONDS` | — | Minimum interval between requests (seconds) |
-| `DASHBOARD_USER` | `admin` | Dashboard Basic Auth username |
-| `DASHBOARD_PASS` | `admin` | Dashboard Basic Auth password |
+| `DASHBOARD_USER` | `admin` | Dashboard sign-in username |
+| `DASHBOARD_PASS` | `admin` | Dashboard sign-in password (change it if the port is reachable from other machines) |
 | `DATA_DIR` | `~/.local/share/copilot-proxy` | Directory for storing tokens and usage database |
 
 ## Authentication
@@ -343,13 +343,17 @@ Estimate token count locally for a Gemini-style request. This is not Google’s 
 GET /dashboard
 ```
 
-Web-based usage analytics dashboard. Protected by Basic Auth (configure via `DASHBOARD_USER` and `DASHBOARD_PASS`).
+Analytics dashboard with the same design and metrics as llm-proxy. Sign in with `DASHBOARD_USER` / `DASHBOARD_PASS`; the session lasts 30 days.
 
 Features:
-- Total requests, tokens, and active IPs overview
-- Time series charts for usage trends
-- Top IPs and models by token usage
-- Filterable by time period (1h, 6h, 24h, 7d, 30d)
+- Requests, success rate, latency (P50/P95/P99/average), time to first token, output speed, and tokens, with per-model comparison, trends, and a sortable table
+- Outcomes (completed, HTTP errors, timeouts, stream errors, incomplete streams, cancellations, rejected requests) and endpoints
+- Token usage and input cache hit rate
+- 1H to 30D or a custom range up to 31 days, model filter, bucket size, live refresh, light/dark theme
+
+`GET /dashboard/api/metrics?from=<ms>&to=<ms>[&model=<id>][&step=<ms>]` returns the report as JSON, in the same shape as llm-proxy's `/api/metrics`. Reports are built on a worker thread, so large ranges do not stall proxied requests.
+
+Only metadata is stored, never prompts or responses. Rows from before outcome tracking count as completed. Output speed excludes reasoning tokens and needs rows that record them, so it has no history from earlier versions.
 
 ## Integration Examples
 

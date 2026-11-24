@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Copilot Proxy · Analytics</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+  <script src="/dashboard/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to analytics</a>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="/dashboard">
+        <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 13h3.5l2.5-6 4 11 2.5-6H21"/></svg></span>
+        <span class="brand-text"><strong>Copilot Proxy</strong><span>Analytics</span></span>
+      </a>
+      <nav class="jump" aria-label="Dashboard sections">
+        <a href="#models-section">Models</a><a href="#traffic-section">Traffic</a><a href="#tokens-section">Tokens</a><a href="#details-section">Details</a>
+      </nav>
+      <div class="segmented range" id="range" role="group" aria-label="Time range">
+        <button type="button" data-value="1" aria-pressed="false" title="Last hour">1H</button>
+        <button type="button" data-value="6" aria-pressed="false" title="Last 6 hours">6H</button>
+        <button type="button" data-value="24" aria-pressed="true" title="Last 24 hours">24H</button>
+        <button type="button" data-value="168" aria-pressed="false" title="Last 7 days">7D</button>
+        <button type="button" data-value="720" aria-pressed="false" title="Last 30 days">30D</button>
+        <button type="button" data-value="custom" aria-pressed="false" title="Custom range">Custom</button>
+      </div>
+      <div class="actions">
+        <button type="button" id="live" class="live-toggle" aria-pressed="false" title="Refresh automatically every 30 seconds"><span class="live-dot" aria-hidden="true"></span>Live</button>
+        <button type="button" id="refresh" class="icon-button" title="Refresh now" aria-label="Refresh now"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v5h-5"/></svg></button>
+        <button type="button" id="theme" class="icon-button" title="Switch theme" aria-label="Switch theme"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z"/></svg></button>
+      </div>
+    </div>
+    <form id="custom-range" class="custom-range" hidden>
+      <div class="shell custom-inner">
+        <label>From<input type="datetime-local" id="from" required></label>
+        <label>To<input type="datetime-local" id="to" required></label>
+        <button type="submit" id="apply-range" class="primary">Apply range</button>
+        <span class="hint">Local time · up to 31 days</span>
+      </div>
+    </form>
+  </header>
+
+  <main id="main" class="shell">
+    <h1 class="sr-only">Copilot Proxy analytics</h1>
+    <div class="context">
+      <div class="context-controls">
+        <label class="field"><span>Model</span><select id="model"><option value="">All models</option></select></label>
+        <button type="button" id="clear-model" class="link-button" hidden>Show all models</button>
+        <label class="field"><span>Bucket</span><select id="step"><option value="auto">Auto</option><option value="60000">1 minute</option><option value="300000">5 minutes</option><option value="900000">15 minutes</option><option value="3600000">1 hour</option><option value="21600000">6 hours</option><option value="86400000">1 day</option></select></label>
+      </div>
+      <p class="meta" aria-live="polite"><span id="range-label">Loading analytics…</span><span id="updated"></span></p>
+    </div>
+    <p id="warning" class="warning" role="status" hidden></p>
+
+    <div id="analytics" aria-busy="true">
+      <section class="kpis" aria-labelledby="summary-heading">
+        <h2 id="summary-heading" class="sr-only">Summary</h2>
+        <article class="kpi"><h3>Requests</h3><strong id="requests">—</strong><p id="requests-detail">&nbsp;</p><svg class="spark accent" id="spark-requests" aria-hidden="true"></svg></article>
+        <article class="kpi"><h3>Success rate</h3><strong id="success">—</strong><p id="errors-detail">&nbsp;</p><svg class="spark bad" id="spark-success" aria-hidden="true"></svg></article>
+        <article class="kpi"><h3>Latency <span class="tag">P50</span></h3><strong id="latency">—</strong><p id="latency-detail">&nbsp;</p><svg class="spark accent" id="spark-latency" aria-hidden="true"></svg></article>
+        <article class="kpi"><h3>First token <span class="tag">P50</span></h3><strong id="ttft">—</strong><p id="ttft-detail">&nbsp;</p><svg class="spark accent" id="spark-ttft" aria-hidden="true"></svg></article>
+        <article class="kpi"><h3>Output speed <span class="tag">P50</span></h3><strong id="speed">—</strong><p id="speed-detail">&nbsp;</p><svg class="spark violet" id="spark-speed" aria-hidden="true"></svg></article>
+        <article class="kpi"><h3>Tokens</h3><strong id="tokens-total">—</strong><p id="tokens-detail">&nbsp;</p><svg class="spark violet" id="spark-tokens" aria-hidden="true"></svg></article>
+      </section>
+
+      <section id="models-section" class="section" aria-labelledby="models-heading">
+        <div class="section-head">
+          <div><h2 id="models-heading">Model performance</h2><p id="compare-note">How each upstream model performs in this range.</p></div>
+          <div class="section-tools">
+            <div class="segmented" id="compare-metric" role="group" aria-label="Compare models by">
+              <button type="button" data-value="latency" aria-pressed="true">Latency P50</button>
+              <button type="button" data-value="latency-avg" aria-pressed="false">Latency Avg</button>
+              <button type="button" data-value="ttft" aria-pressed="false">First token</button>
+              <button type="button" data-value="speed" aria-pressed="false">Speed</button>
+              <button type="button" data-value="success" aria-pressed="false">Success</button>
+              <button type="button" data-value="volume" aria-pressed="false">Volume</button>
+            </div>
+            <label class="field inline"><span>Sort</span><select id="compare-sort"><option value="best">Best first</option><option value="traffic">Most traffic</option></select></label>
+          </div>
+        </div>
+        <article class="panel compare-panel">
+          <div id="compare-legend" class="compare-legend"></div>
+          <ol id="compare" class="compare-list" aria-label="Model comparison"></ol>
+        </article>
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <div><h3>Model trends</h3><p id="model-chart-note">Busiest models over time.</p></div>
+            <div class="segmented" id="model-metric" role="group" aria-label="Trend metric">
+              <button type="button" data-value="latency-p50" aria-pressed="true">Latency P50</button>
+              <button type="button" data-value="latency-p95" aria-pressed="false">Latency P95</button>
+              <button type="button" data-value="latency-avg" aria-pressed="false">Latency Avg</button>
+              <button type="button" data-value="ttft-p50" aria-pressed="false">First token P50</button>
+              <button type="button" data-value="speed" aria-pressed="false">Speed</button>
+            </div>
+          </div>
+          <div id="model-legend" class="legend"></div>
+          <div class="chart"><svg id="model-chart" role="group" aria-label="Model trends"></svg><div id="model-tooltip" class="tooltip" hidden></div><p id="model-empty" class="chart-empty" hidden></p></div>
+        </article>
+      </section>
+
+      <section id="traffic-section" class="section" aria-labelledby="traffic-heading">
+        <div class="section-head"><div><h2 id="traffic-heading">Traffic</h2><p>Request volume by model, outcomes, and endpoints.</p></div></div>
+        <div class="split">
+          <article class="panel chart-panel">
+            <div class="panel-head"><div><h3>Requests over time</h3><p>Stacked by model. The red line marks failures.</p></div></div>
+            <div id="traffic-legend" class="legend"></div>
+            <div class="chart"><svg id="traffic-chart" role="group" aria-label="Requests over time"></svg><div id="traffic-tooltip" class="tooltip" hidden></div><p id="traffic-empty" class="chart-empty" hidden>No requests in this range.</p></div>
+          </article>
+          <div class="stack">
+            <article class="panel side-panel"><h3>Outcomes</h3><div class="donut-row"><div class="donut" id="outcomes-chart"></div><ul id="outcomes-legend" class="breakdown" aria-label="Request outcomes"></ul></div></article>
+            <article class="panel side-panel"><h3>Endpoints</h3><ul id="endpoints" class="endpoint-list" aria-label="Requests by endpoint"></ul></article>
+          </div>
+        </div>
+      </section>
+
+      <section id="tokens-section" class="section" aria-labelledby="tokens-heading">
+        <div class="section-head"><div><h2 id="tokens-heading">Token usage</h2><p>Cache reads and writes are part of input, not extra tokens.</p></div></div>
+        <div class="split reverse">
+          <div class="stack">
+            <article class="panel cache-card"><h3>Input cache hit rate</h3><strong id="cache-rate">—</strong><div class="meter" aria-hidden="true"><span id="cache-rate-bar"></span></div><p id="cache-rate-detail">&nbsp;</p></article>
+            <article class="panel side-panel"><ul id="tokens" class="token-stats" aria-label="Token totals"></ul><p id="tokens-note" class="panel-note" hidden></p></article>
+          </div>
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div><h3>Tokens over time</h3><p id="token-chart-note">&nbsp;</p></div>
+              <div class="segmented" id="token-view" role="group" aria-label="Token view">
+                <button type="button" data-value="totals" aria-pressed="true">Input / output</button>
+                <button type="button" data-value="cache" aria-pressed="false">Cache</button>
+                <button type="button" data-value="cache-rate" aria-pressed="false">Hit rate</button>
+              </div>
+            </div>
+            <div id="token-legend" class="legend"></div>
+            <div class="chart"><svg id="token-chart" role="group" aria-label="Tokens over time"></svg><div id="token-tooltip" class="tooltip" hidden></div><p id="token-empty" class="chart-empty" hidden></p></div>
+          </article>
+        </div>
+        <article class="panel compare-panel">
+          <div class="panel-head"><div><h3>Input by model</h3><p>Solid: served from cache. Light: total input. Sorted by input tokens.</p></div></div>
+          <ol id="token-models" class="compare-list" aria-label="Token usage by model"></ol>
+        </article>
+      </section>
+
+      <section id="details-section" class="section" aria-labelledby="details-heading">
+        <div class="section-head"><div><h2 id="details-heading">All models</h2><p>Select a column to sort, or a model to focus the dashboard on it.</p></div><span id="model-count" class="badge">0 models</span></div>
+        <div class="panel table-panel"><div class="table-scroll" tabindex="0" role="region" aria-label="Per-model analytics table"><table><thead><tr id="models-head"></tr></thead><tbody id="models"></tbody></table></div></div>
+      </section>
+    </div>
+    <footer><span>Copilot Proxy · analytics</span><span>Metadata only — no prompts or responses are stored. <b>—</b> means unreported, not zero.</span></footer>
+  </main>
+</body>
+</html>

@@ -56,8 +56,33 @@ function isValidSession(
   }
 }
 
+/** Sign-in page in the dashboard's visual style. Uses only /dashboard/style.css, which is public. */
 function loginPage(error = false): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dashboard Login</title><style>body{margin:0;background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh}.card{width:min(360px,calc(100vw - 48px));background:#1e293b;border:1px solid #334155;border-radius:16px;padding:32px}h1{font-size:24px;margin:0 0 24px}label{display:block;color:#94a3b8;font-size:13px;margin:14px 0 6px}input{box-sizing:border-box;width:100%;padding:11px 12px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#f8fafc}button{width:100%;margin-top:22px;padding:11px;border:0;border-radius:8px;background:#2563eb;color:white;font-weight:600;cursor:pointer}.error{color:#fca5a5;font-size:13px}</style></head><body><form class="card" method="post" action="/dashboard/login"><h1>Dashboard Login</h1>${error ? '<p class="error">Invalid username or password.</p>' : ''}<label for="username">Username</label><input id="username" name="username" autocomplete="username" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><button type="submit">Sign in</button></form></body></html>`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Copilot Proxy · Sign in</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+  <main class="login-shell">
+    <form class="panel login-card" method="post" action="/dashboard/login">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 13h3.5l2.5-6 4 11 2.5-6H21"/></svg></span>
+        <span class="brand-text"><strong>Copilot Proxy</strong><span>Analytics</span></span>
+      </div>
+      <h1>Sign in</h1>
+      ${error ? '<p class="login-error" role="alert">Invalid username or password.</p>' : ""}
+      <label class="login-field">Username<input name="username" autocomplete="username" required autofocus></label>
+      <label class="login-field">Password<input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit" class="primary">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>`;
 }
 
 export function createDashboardAuth(username: string, password: string) {
