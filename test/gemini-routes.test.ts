@@ -25,10 +25,10 @@ afterEach(() => {
   delete state.models;
 });
 
-function geminiRequest(version: typeof versions[number], method: string, headers: HeadersInit = {}, body: unknown = requestBody) {
+function geminiRequest(version: typeof versions[number], method: string, headers: HeadersInit = {}, body: unknown = requestBody, modelId = model) {
   const requestHeaders = new Headers(headers);
   requestHeaders.set("content-type", "application/json");
-  return app.request(`/${version}/models/${model}:${method}`, {
+  return app.request(`/${version}/models/${modelId}:${method}`, {
     method: "POST",
     headers: requestHeaders,
     body: JSON.stringify(body),
@@ -119,6 +119,48 @@ for (const version of versions) {
     }
   });
 }
+
+test("Supported Gemini thinking levels reach Copilot in both generation modes", async (t) => {
+  const cases = [
+    ["gemini-4-neon", "MEDIUM", "medium"],
+    ["gemini-4-neon", "HIGH", "high"],
+    ["gemini-4-neon", "XHIGH", "xhigh"],
+    ["gemini-4-neon", "LOW", "low"],
+    ["gemini-4-neon", "MAX", undefined],
+    ["gemini-4-neon", undefined, undefined],
+    ["gemini-4-carbon", "HIGH", "high"],
+    ["gemini-4-carbon", "XHIGH", undefined],
+    ["gemini-3.8-flash", "MEDIUM", "medium"],
+    ["gemini-3.8-flash", "HIGH", "high"],
+    ["gemini-3.8-flash", "XHIGH", undefined],
+    ["gemini-2.5-flash", "HIGH", undefined],
+  ] as const;
+  const upstream = t.mock.method(globalThis, "fetch", async (input: string, init?: RequestInit) => {
+    assert.equal(input, "https://api.githubcopilot.com/chat/completions");
+    const payload = JSON.parse(String(init?.body)) as ChatCompletionsPayload;
+    if (payload.stream) {
+      return new Response('data: {"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+    return Response.json({ choices: [{ index: 0, message: { content: "OK" }, finish_reason: "stop" }] });
+  });
+  let requests = 0;
+  for (const [modelId, thinkingLevel, effort] of cases) {
+    for (const [version, method] of [["v1", "generateContent"], ["v1beta", "streamGenerateContent?alt=sse"]] as const) {
+      const response = await geminiRequest(version, method, { "x-goog-api-key": proxyKey }, {
+        ...requestBody, generationConfig: { ...requestBody.generationConfig, thinkingConfig: { thinkingLevel, includeThoughts: true } },
+      }, modelId);
+      assert.equal(response.status, 200);
+      assert.match(await response.text(), /"text":"OK"/);
+      assert.equal(upstream.mock.callCount(), ++requests);
+      const payload = JSON.parse(String(upstream.mock.calls.at(-1)?.arguments[1]?.body));
+      assert.equal(payload.model, modelId);
+      assert.equal(payload.reasoning_effort, effort);
+      assert.equal(Object.hasOwn(payload, "reasoning_effort"), effort !== undefined);
+    }
+  }
+});
 
 test("Gemini tool loops preserve SDK JSON schemas, legacy schemas, and text after tool results", async (t) => {
   const parametersJsonSchema = {

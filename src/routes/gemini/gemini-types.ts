@@ -40,6 +40,7 @@ export interface GeminiGenerationConfig {
   maxOutputTokens?: number;
   stopSequences?: string[];
   candidateCount?: number;
+  thinkingConfig?: { thinkingLevel?: string; includeThoughts?: boolean; thinkingBudget?: number };
 }
 
 export interface GeminiGenerateContentResponse {
