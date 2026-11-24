@@ -294,7 +294,7 @@ curl -X POST http://localhost:6628/v1/models/gemini-4-carbon:generateContent \
   }'
 ```
 
-**Translated parameters:** `contents`, `systemInstruction`, `generationConfig` (`temperature`, `topP`, `maxOutputTokens`, `stopSequences`, `candidateCount`), function declarations, and basic function calling modes. For Gemini 4, `generationConfig.thinkingConfig.thinkingLevel` maps to Copilot `reasoning_effort` (including `XHIGH` for Neon and Hydrogen). Availability depends on your Copilot account. Thinking budgets and thought summaries are not translated. The upstream model may limit some of these parameters.
+**Translated parameters:** `contents`, `systemInstruction`, `generationConfig` (`temperature`, `topP`, `maxOutputTokens`, `stopSequences`, `candidateCount`), function declarations, and basic function calling modes. For Gemini 4 and Gemini 3.8 Flash, `generationConfig.thinkingConfig.thinkingLevel` maps to Copilot `reasoning_effort` (including `XHIGH` for Neon and Hydrogen). Availability depends on your Copilot account. Thinking budgets and thought summaries are not translated. The upstream model may limit some of these parameters.
 
 **Google Gen AI JavaScript SDK (`@google/genai`):**
 

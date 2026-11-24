@@ -120,7 +120,7 @@ for (const version of versions) {
   });
 }
 
-test("Gemini 4 thinking levels reach Copilot in both generation modes", async (t) => {
+test("Supported Gemini thinking levels reach Copilot in both generation modes", async (t) => {
   const cases = [
     ["gemini-4-neon", "MEDIUM", "medium"],
     ["gemini-4-neon", "HIGH", "high"],
@@ -130,6 +130,9 @@ test("Gemini 4 thinking levels reach Copilot in both generation modes", async (t
     ["gemini-4-neon", undefined, undefined],
     ["gemini-4-carbon", "HIGH", "high"],
     ["gemini-4-carbon", "XHIGH", undefined],
+    ["gemini-3.8-flash", "MEDIUM", "medium"],
+    ["gemini-3.8-flash", "HIGH", "high"],
+    ["gemini-3.8-flash", "XHIGH", undefined],
     ["gemini-2.5-flash", "HIGH", undefined],
   ] as const;
   const upstream = t.mock.method(globalThis, "fetch", async (input: string, init?: RequestInit) => {
