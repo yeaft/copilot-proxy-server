@@ -125,9 +125,19 @@ geminiRoutes.post(
 
       const openAIPayload = translateGeminiToOpenAI(modelId, requestBody);
 
-      // Simple token estimation
-      const jsonStr = JSON.stringify(openAIPayload.messages);
-      const estimatedTokens = Math.ceil(jsonStr.length / 4);
+      // Keep the existing text estimate, but never serialize image transport for counting.
+      // The proxy does not know the upstream model's image tokenization rules.
+      let imageCount = 0;
+      const messages = openAIPayload.messages.map((message) => {
+        if (!Array.isArray(message.content)) return message;
+        const content = message.content.filter((part) => {
+          if (part.type !== "image_url") return true;
+          imageCount++;
+          return false;
+        });
+        return { ...message, content };
+      });
+      const estimatedTokens = Math.ceil(JSON.stringify(messages).length / 4) + 256 * imageCount;
 
       return c.json({ totalTokens: estimatedTokens }, 200);
     } catch (error) {
