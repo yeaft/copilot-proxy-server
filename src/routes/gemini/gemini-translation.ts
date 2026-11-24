@@ -16,6 +16,20 @@ import type {
 
 // === Request translation (Gemini -> OpenAI) ===
 
+// Gemini 4's native thinking levels map one-to-one to Chat Completions effort.
+// https://aistudio.google.com/docs/openai#thinking
+const gemini4ReasoningModels = new Set([
+  "gemini-4-carbon", "gemini-4-argon", "gemini-4-neon", "gemini-4-hydrogen",
+]);
+
+function gemini4ReasoningEffort(modelId: string, level: unknown): ChatCompletionsPayload["reasoning_effort"] {
+  if (!gemini4ReasoningModels.has(modelId) || typeof level !== "string") return undefined;
+  const effort = level.toLowerCase();
+  if (effort === "low" || effort === "medium" || effort === "high") return effort;
+  if (effort === "xhigh" && (modelId === "gemini-4-neon" || modelId === "gemini-4-hydrogen")) return effort;
+  return undefined;
+}
+
 export function translateGeminiToOpenAI(
   modelId: string,
   request: GeminiGenerateContentRequest
@@ -47,6 +61,9 @@ export function translateGeminiToOpenAI(
     stop: request.generationConfig?.stopSequences,
     n: request.generationConfig?.candidateCount,
   };
+
+  const reasoningEffort = gemini4ReasoningEffort(modelId, request.generationConfig?.thinkingConfig?.thinkingLevel);
+  if (reasoningEffort !== undefined) payload.reasoning_effort = reasoningEffort;
 
   // Tools
   if (request.tools) {
