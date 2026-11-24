@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
+import { crc32 } from "node:zlib";
 
 import { state } from "../src/lib/state.js";
 import { app } from "../src/server.js";
@@ -330,4 +331,41 @@ test("Gemini ignores invalid and non-inline attachments without interpreting opa
     hasImage = true;
   }
   assert.equal(upstream.mock.callCount(), 2);
+});
+
+
+test("Gemini countTokens estimates direct and tool images independently of base64 size", async (t) => {
+  const upstream = t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("countTokens must not contact the upstream");
+  });
+  const bytes = Buffer.from(png, "base64");
+  const chunk = Buffer.alloc(128 * 1024 + 12);
+  chunk.writeUInt32BE(chunk.length - 12);
+  chunk.write("vpAg", 4);
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, -4)), chunk.length - 4);
+  const largeImage = { inlineData: {
+    mimeType: "image/png",
+    data: Buffer.concat([bytes.subarray(0, 33), chunk, bytes.subarray(33)]).toString("base64"),
+  } };
+
+  for (const version of versions) {
+    for (const source of ["tool", "user"]) {
+      async function count(parts: (typeof image)[] = [], text = "Count words.") {
+        const response = await geminiRequest(version, "countTokens", { "x-goog-api-key": proxyKey }, { contents: [{
+          role: "user", parts: source === "tool"
+            ? [{ functionResponse: { id: "call_view", name: "ViewImage", response: { text }, parts } }]
+            : [{ text }, ...parts],
+        }] });
+        assert.equal(response.status, 200);
+        return (await response.json()).totalTokens;
+      }
+      const baseline = await count();
+      const small = await count([image]);
+      assert.ok(small >= baseline + 256 && small < baseline + 300);
+      assert.equal(await count([largeImage]), small);
+      assert.equal(await count([image, largeImage]), small + 256);
+      assert.ok(await count([largeImage], "More text. ".repeat(100)) > small);
+    }
+  }
+  assert.equal(upstream.mock.callCount(), 0);
 });
