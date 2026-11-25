@@ -414,7 +414,9 @@ test("Gemini caps forwarded images to the newest 5 across uploads and tool resul
   const firstUserContent = forwardedPayload.messages[0].content;
   assert.ok(Array.isArray(firstUserContent));
   assert.equal(
-    firstUserContent.filter((part) => part.type === "text" && part.text.includes("Older image omitted: proxy request limit (5)")).length,
+    firstUserContent.filter((part) => part.type === "text"
+      && part.text.includes("Older image omitted: proxy request limit (5")
+      && part.text.includes("do not reopen images you already inspected")).length,
     3
   );
 });
@@ -462,7 +464,8 @@ test("Gemini tool image cap validates newest tool images first so old oversized 
   );
   assert.deepEqual(sentImages, newer.map((item) => item.part));
   const serialized = JSON.stringify(forwardedPayload.messages);
-  assert.match(serialized, /4 older images omitted: proxy request limit \(5\)/);
+  assert.match(serialized, /4 older images omitted: proxy request limit \(5/);
+  assert.match(serialized, /do not reopen images you already inspected/);
 });
 
 test("Gemini tool image cap skips corrupt newer images without starving valid older ones and bounds countTokens at 5", async (t) => {

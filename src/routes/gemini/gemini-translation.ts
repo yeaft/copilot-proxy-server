@@ -37,7 +37,7 @@ function capTranslatedImages(messages: Message[], maxImages = MAX_GEMINI_REQUEST
       changed = true;
       next[p] = {
         type: "text",
-        text: `[Older image omitted: proxy request limit (${maxImages}).]`,
+        text: `[Older image omitted: proxy request limit (${maxImages}; newest ${maxImages} kept). Record findings from the currently visible images before opening another batch; do not reopen images you already inspected.]`,
       };
     }
     if (changed) message.content = next;
@@ -176,9 +176,9 @@ export function translateGeminiToOpenAI(
       if (!slot) continue;
       const parts: ContentPart[] = [];
       if (slot.omittedCount === 1) {
-        parts.push({ type: "text", text: `[Older image omitted: proxy request limit (${MAX_GEMINI_REQUEST_IMAGES}).]` });
+        parts.push({ type: "text", text: `[Older image omitted: proxy request limit (${MAX_GEMINI_REQUEST_IMAGES}; newest ${MAX_GEMINI_REQUEST_IMAGES} kept). Record findings from the currently visible images before opening another batch; do not reopen images you already inspected.]` });
       } else if (slot.omittedCount > 1) {
-        parts.push({ type: "text", text: `[${slot.omittedCount} older images omitted: proxy request limit (${MAX_GEMINI_REQUEST_IMAGES}).]` });
+        parts.push({ type: "text", text: `[${slot.omittedCount} older images omitted: proxy request limit (${MAX_GEMINI_REQUEST_IMAGES}; newest ${MAX_GEMINI_REQUEST_IMAGES} kept). Record findings from the currently visible images before opening another batch; do not reopen images you already inspected.]` });
       }
       parts.push(...slot.kept);
       if (parts.length > 0) attachments.push({ resultIndex: resultCount, images: parts });

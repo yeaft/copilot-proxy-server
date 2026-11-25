@@ -32,7 +32,8 @@ export async function handleResponses(c: Context, observation: RequestObservatio
     observation.endpoint = "deepseek-responses";
     const response = await createDeepseekCompletion(
       "/v1/responses",
-      payload as unknown as Record<string, unknown>
+      payload as unknown as Record<string, unknown>,
+      { signal: c.req.raw.signal }
     );
 
     // The body is relayed untouched, so usage is unknown and timing ends at the upstream headers.
@@ -41,7 +42,9 @@ export async function handleResponses(c: Context, observation: RequestObservatio
   }
 
   const clientHeaders = extractClientHeaders(c);
-  const response = await createResponses(payload, clientHeaders);
+  const response = await createResponses(payload, clientHeaders, {
+    signal: c.req.raw.signal,
+  });
 
   // Non-streaming: response is a ResponsesResult object
   if (isNonStreamingResult(response)) {

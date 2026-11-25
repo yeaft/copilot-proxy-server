@@ -182,7 +182,8 @@ function outcomeForStatus(status: number): RequestOutcome {
   return status < 500 ? "rejected" : "upstream_error";
 }
 
-function outcomeForError(error: unknown, requestParsed: boolean): RequestOutcome {
+function outcomeForError(error: unknown, requestParsed: boolean, clientAborted: boolean): RequestOutcome {
+  if (clientAborted) return "cancelled";
   if (error instanceof UpstreamHeadersTimeoutError) return "timeout";
   if (error instanceof HTTPError) return "http_error";
   return requestParsed ? "upstream_error" : "rejected";
@@ -203,8 +204,13 @@ export async function observeModelRequest(
     if (!observation.isStreaming) observation.finish(outcomeForStatus(response.status), response.status);
     return response;
   } catch (error) {
+    const clientAborted = c.req.raw.signal?.aborted === true;
+    if (clientAborted) {
+      observation.finish("cancelled", CLIENT_CLOSED_STATUS);
+      return c.body(null, CLIENT_CLOSED_STATUS as never);
+    }
     const response = await forwardError(c, error);
-    observation.finish(outcomeForError(error, observation.requestParsed), response.status);
+    observation.finish(outcomeForError(error, observation.requestParsed, false), response.status);
     return response;
   }
 }

@@ -32,7 +32,8 @@ export function isDeepseekModel(model: string): boolean {
  */
 export async function createDeepseekCompletion(
   endpoint: DeepseekEndpoint,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  options: { signal?: AbortSignal } = {}
 ): Promise<Response> {
   if (!state.deepseekApiKey) {
     throw new Error("DeepSeek API key not configured");
@@ -58,6 +59,7 @@ export async function createDeepseekCompletion(
     method: "POST",
     headers,
     body: JSON.stringify(payload),
+    signal: options.signal,
   });
 
   if (!response.ok) {

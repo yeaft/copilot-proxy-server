@@ -66,6 +66,8 @@ export function initiatorFor(messages: Array<Message>): "agent" | "user" {
 export interface ChatCompletionsOptions {
   /** Yield the upstream `[DONE]` sentinel instead of swallowing it. */
   forwardDone?: boolean;
+  /** Cancel the upstream request when the downstream client disconnects. */
+  signal?: AbortSignal;
 }
 
 export async function createChatCompletions(
@@ -88,6 +90,7 @@ export async function createChatCompletions(
     method: "POST",
     headers,
     body: JSON.stringify(payload),
+    signal: options.signal,
   });
 
   if (!response.ok) {
@@ -175,6 +178,8 @@ export interface ResponsesRequestOptions {
   vision?: boolean;
   /** Copilot X-Initiator header; defaults to "user". */
   initiator?: "agent" | "user";
+  /** Cancel the upstream request when the downstream client disconnects. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -201,6 +206,7 @@ export async function createResponses(
     method: "POST",
     headers,
     body: JSON.stringify(payload),
+    signal: options.signal,
   });
 
   if (!response.ok) {
