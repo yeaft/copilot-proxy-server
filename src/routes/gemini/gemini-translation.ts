@@ -61,16 +61,17 @@ function hasInlineImageShape(part: unknown): boolean {
   if (!inlineData || typeof inlineData !== "object" || !("mimeType" in inlineData) || !("data" in inlineData)) return false;
   const { mimeType, data } = inlineData as { mimeType?: unknown; data?: unknown };
   return (mimeType === "image/png" || mimeType === "image/jpeg" || mimeType === "image/gif" || mimeType === "image/webp")
-    && typeof data === "string" && data.length > 0;
+    && typeof data === "string" && data.length > 0 && data.length % 4 === 0;
 }
 
 function selectRecentToolImages(contents: GeminiContent[]): Map<string, ToolSlotImages> {
   const pending: PendingToolImage[] = [];
   for (let c = 0; c < contents.length; c++) {
-    const parts = contents[c].parts;
+    const parts = contents[c]?.parts;
+    if (!Array.isArray(parts)) continue;
     for (let p = 0; p < parts.length; p++) {
       const part = parts[p];
-      if (!("functionResponse" in part) || !Array.isArray(part.functionResponse.parts)) continue;
+      if (!part || typeof part !== "object" || !("functionResponse" in part) || !Array.isArray(part.functionResponse.parts)) continue;
       for (const candidate of part.functionResponse.parts) {
         pending.push({ contentIndex: c, responseIndex: p, part: candidate });
       }
@@ -174,8 +175,10 @@ export function translateGeminiToOpenAI(
       const slot = toolImagesBySlot.get(`${contentIndex}:${responseIndex}`);
       if (!slot) continue;
       const parts: ContentPart[] = [];
-      for (let omitted = 0; omitted < slot.omittedCount; omitted++) {
+      if (slot.omittedCount === 1) {
         parts.push({ type: "text", text: `[Older image omitted: proxy request limit (${MAX_GEMINI_REQUEST_IMAGES}).]` });
+      } else if (slot.omittedCount > 1) {
+        parts.push({ type: "text", text: `[${slot.omittedCount} older images omitted: proxy request limit (${MAX_GEMINI_REQUEST_IMAGES}).]` });
       }
       parts.push(...slot.kept);
       if (parts.length > 0) attachments.push({ resultIndex: resultCount, images: parts });
