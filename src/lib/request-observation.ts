@@ -2,7 +2,12 @@ import type { Context } from "hono";
 import { streamSSE, type SSEStreamingApi } from "hono/streaming";
 
 import { logUsage, type RequestOutcome, type TokenUsage } from "./db.js";
-import { forwardError, HTTPError, UpstreamHeadersTimeoutError } from "./error.js";
+import {
+  forwardError,
+  HTTPError,
+  isUpstreamBodyTimeoutError,
+  UpstreamHeadersTimeoutError,
+} from "./error.js";
 import { getClientIp } from "./ip.js";
 import { hasChatOutput, hasResponsesOutput } from "./latency.js";
 import type { ChatCompletionChunk, ChatCompletionUsage } from "../types/openai.js";
@@ -60,6 +65,7 @@ export class RequestObservation {
   private terminal = false;
   private failed = false;
   private readFailed = false;
+  private readTimedOut = false;
   private closedAt: number | null = null;
   private recorded = false;
 
@@ -131,8 +137,9 @@ export class RequestObservation {
   }
 
   /** Reading the upstream stream failed; the relay reported it to the client itself. */
-  streamReadFailed(): void {
+  streamReadFailed(timedOut = false): void {
     this.readFailed = true;
+    if (timedOut) this.readTimedOut = true;
   }
 
   /** The client disconnected. A response that already reached its terminal event still completed. */
@@ -149,6 +156,7 @@ export class RequestObservation {
   endStream(threw: boolean): void {
     const outcome: RequestOutcome =
       this.closedAt !== null ? "cancelled"
+      : this.readTimedOut ? "timeout"
       : threw || this.readFailed ? "upstream_error"
       : this.failed ? "stream_error"
       : this.terminal ? "ok"
@@ -183,7 +191,7 @@ function outcomeForStatus(status: number): RequestOutcome {
 }
 
 function outcomeForError(error: unknown, requestParsed: boolean): RequestOutcome {
-  if (error instanceof UpstreamHeadersTimeoutError) return "timeout";
+  if (error instanceof UpstreamHeadersTimeoutError || isUpstreamBodyTimeoutError(error)) return "timeout";
   if (error instanceof HTTPError) return "http_error";
   return requestParsed ? "upstream_error" : "rejected";
 }
@@ -233,6 +241,9 @@ export function streamObserved(
       if (c.req.raw.signal?.aborted) {
         observation.clientClosed();
         return;
+      }
+      if (isUpstreamBodyTimeoutError(error)) {
+        observation.streamReadFailed(true);
       }
       threw = true;
       throw error;

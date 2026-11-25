@@ -4,6 +4,7 @@ import { logger } from "../../lib/logger.js";
 import { state } from "../../lib/state.js";
 import { checkRateLimit } from "../../lib/rate-limit.js";
 import { extractClientHeaders } from "../../lib/headers.js";
+import { isUpstreamBodyTimeoutError } from "../../lib/upstream-fetch.js";
 import {
   chatUsage,
   parseEventData,
@@ -162,15 +163,22 @@ function streamChatChunks(
         observation.clientClosed();
         return;
       }
-      observation.streamReadFailed();
+      const isBodyTimeout = isUpstreamBodyTimeoutError(error);
+      observation.streamReadFailed(isBodyTimeout);
       logger.error("Chat completions stream failed:", error);
       await stream.writeSSE({
         data: JSON.stringify({
-          error: {
-            message: error instanceof Error ? error.message : String(error),
-            type: "upstream_error",
-            code: null,
-          },
+          error: isBodyTimeout
+            ? {
+                message: "Upstream stream timed out waiting for data.",
+                type: "upstream_error",
+                code: "upstream_stream_timeout",
+              }
+            : {
+                message: error instanceof Error ? error.message : String(error),
+                type: "upstream_error",
+                code: null,
+              },
         }),
       });
     }

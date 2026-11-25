@@ -19,6 +19,22 @@ export class UpstreamHeadersTimeoutError extends Error {
   }
 }
 
+/** Detect Undici's body-silence timeout anywhere in an error's cause chain. */
+export function isUpstreamBodyTimeoutError(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth++) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const candidate = current as { code?: unknown; name?: unknown; cause?: unknown };
+    if (candidate.code === "UND_ERR_BODY_TIMEOUT" || candidate.name === "BodyTimeoutError") {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
+}
+
 export async function forwardError(c: Context, error: unknown) {
   logger.error("Error occurred:", error);
 
@@ -29,6 +45,19 @@ export async function forwardError(c: Context, error: unknown) {
           message: error.message,
           type: "upstream_error",
           code: "upstream_headers_timeout",
+        },
+      },
+      504
+    );
+  }
+
+  if (isUpstreamBodyTimeoutError(error)) {
+    return c.json(
+      {
+        error: {
+          message: "Upstream stream timed out waiting for data.",
+          type: "upstream_error",
+          code: "upstream_stream_timeout",
         },
       },
       504
