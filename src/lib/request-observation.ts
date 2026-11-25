@@ -182,8 +182,7 @@ function outcomeForStatus(status: number): RequestOutcome {
   return status < 500 ? "rejected" : "upstream_error";
 }
 
-function outcomeForError(error: unknown, requestParsed: boolean, clientAborted: boolean): RequestOutcome {
-  if (clientAborted) return "cancelled";
+function outcomeForError(error: unknown, requestParsed: boolean): RequestOutcome {
   if (error instanceof UpstreamHeadersTimeoutError) return "timeout";
   if (error instanceof HTTPError) return "http_error";
   return requestParsed ? "upstream_error" : "rejected";
@@ -204,20 +203,20 @@ export async function observeModelRequest(
     if (!observation.isStreaming) observation.finish(outcomeForStatus(response.status), response.status);
     return response;
   } catch (error) {
-    const clientAborted = c.req.raw.signal?.aborted === true;
-    if (clientAborted) {
+    if (c.req.raw.signal?.aborted === true) {
       observation.finish("cancelled", CLIENT_CLOSED_STATUS);
       return c.body(null, CLIENT_CLOSED_STATUS as never);
     }
     const response = await forwardError(c, error);
-    observation.finish(outcomeForError(error, observation.requestParsed, false), response.status);
+    observation.finish(outcomeForError(error, observation.requestParsed), response.status);
     return response;
   }
 }
 
 /**
  * `streamSSE` that records the observation when the relay ends. Relay errors keep
- * propagating to Hono exactly as before.
+ * propagating to Hono exactly as before (except client disconnects, which already
+ * terminated the response stream and should not log spurious upstream errors).
  */
 export function streamObserved(
   c: Context,
@@ -231,6 +230,10 @@ export function streamObserved(
     try {
       await relay(stream);
     } catch (error) {
+      if (c.req.raw.signal?.aborted) {
+        observation.clientClosed();
+        return;
+      }
       threw = true;
       throw error;
     } finally {

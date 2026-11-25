@@ -118,20 +118,28 @@ async function* parseSSEStream(
   );
 
   const reader = parser.getReader();
+  let completed = false;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        completed = true;
+        break;
+      }
 
       if (value.data === "[DONE]") {
         if (forwardDone) yield { data: value.data };
+        completed = true;
         break;
       }
 
       yield { data: value.data };
     }
   } finally {
+    if (!completed) {
+      await reader.cancel().catch(() => {});
+    }
     reader.releaseLock();
   }
 }
@@ -234,17 +242,27 @@ async function* parseSSEStreamWithEvent(
   );
 
   const reader = parser.getReader();
+  let completed = false;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        completed = true;
+        break;
+      }
 
-      if (value.data === "[DONE]") break;
+      if (value.data === "[DONE]") {
+        completed = true;
+        break;
+      }
 
       yield { event: value.event || "", data: value.data };
     }
   } finally {
+    if (!completed) {
+      await reader.cancel().catch(() => {});
+    }
     reader.releaseLock();
   }
 }

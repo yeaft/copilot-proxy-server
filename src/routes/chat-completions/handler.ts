@@ -158,6 +158,10 @@ function streamChatChunks(
         await stream.writeSSE({ data: chunk.data });
       }
     } catch (error) {
+      if (c.req.raw.signal?.aborted) {
+        observation.clientClosed();
+        return;
+      }
       observation.streamReadFailed();
       logger.error("Chat completions stream failed:", error);
       await stream.writeSSE({
