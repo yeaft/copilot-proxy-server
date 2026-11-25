@@ -2,10 +2,14 @@ import type { Context } from "hono";
 import { streamSSE, type SSEStreamingApi } from "hono/streaming";
 
 import { logUsage, type RequestOutcome, type TokenUsage } from "./db.js";
-import { forwardError, HTTPError, UpstreamHeadersTimeoutError } from "./error.js";
+import {
+  forwardError,
+  HTTPError,
+  isUpstreamBodyTimeoutError,
+  UpstreamHeadersTimeoutError,
+} from "./error.js";
 import { getClientIp } from "./ip.js";
 import { hasChatOutput, hasResponsesOutput } from "./latency.js";
-import { isUpstreamBodyTimeoutError } from "./upstream-fetch.js";
 import type { ChatCompletionChunk, ChatCompletionUsage } from "../types/openai.js";
 import type { ResponsesUsage, ResponseStreamEvent } from "../types/responses.js";
 
@@ -187,7 +191,7 @@ function outcomeForStatus(status: number): RequestOutcome {
 }
 
 function outcomeForError(error: unknown, requestParsed: boolean): RequestOutcome {
-  if (error instanceof UpstreamHeadersTimeoutError) return "timeout";
+  if (error instanceof UpstreamHeadersTimeoutError || isUpstreamBodyTimeoutError(error)) return "timeout";
   if (error instanceof HTTPError) return "http_error";
   return requestParsed ? "upstream_error" : "rejected";
 }

@@ -214,9 +214,21 @@ test("streamed body timeout is recorded with outcome timeout", async (t) => {
   );
   await (await post("/v1/responses", { model: "gpt-6-luna", input: "hi", stream: true })).text().catch(() => {});
 
-  const [chatRow, responsesRow] = await waitForRows(2);
+  upstream.mock.mockImplementation(async () => bodyTimeoutStream([]));
+  const nonStreamTimeout = await chat({ model: "gemini-4-carbon", stream: false });
+  assert.equal(nonStreamTimeout.status, 504);
+  assert.deepEqual(await nonStreamTimeout.json(), {
+    error: {
+      message: "Upstream stream timed out waiting for data.",
+      type: "upstream_error",
+      code: "upstream_stream_timeout",
+    },
+  });
+
+  const [chatRow, responsesRow, nonStreamRow] = await waitForRows(3);
   assert.deepEqual([chatRow.endpoint, chatRow.outcome, chatRow.status], ["openai", "timeout", 200]);
   assert.deepEqual([responsesRow.endpoint, responsesRow.outcome, responsesRow.status], ["responses", "timeout", 200]);
+  assert.deepEqual([nonStreamRow.endpoint, nonStreamRow.outcome, nonStreamRow.status], ["openai", "timeout", 504]);
 });
 
 test("responses-only models: an upstream failure inside the bridged stream is a stream error", async (t) => {

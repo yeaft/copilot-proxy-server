@@ -1,6 +1,8 @@
 import { Agent, EnvHttpProxyAgent, type Dispatcher } from "undici";
 
-import { UpstreamHeadersTimeoutError } from "./error.js";
+import { isUpstreamBodyTimeoutError, UpstreamHeadersTimeoutError } from "./error.js";
+
+export { isUpstreamBodyTimeoutError };
 
 export const UPSTREAM_HEADERS_TIMEOUT_MS = 120_000;
 /**
@@ -18,10 +20,15 @@ export type UpstreamRequestInit = RequestInit & { dispatcher?: Dispatcher };
 let cachedDispatcher: Dispatcher | null = null;
 let cachedEnvProxyKey: string | null = null;
 
+function shouldUseEnvProxy(): boolean {
+  if (process.env.NODE_USE_ENV_PROXY === "1") return true;
+  if (process.execArgv.includes("--use-env-proxy")) return true;
+  const nodeOptions = process.env.NODE_OPTIONS;
+  return typeof nodeOptions === "string" && /(?:^|\s)--use-env-proxy(?=\s|$)/.test(nodeOptions);
+}
+
 function envProxyCacheKey(): string {
-  const useEnvProxy =
-    process.env.NODE_USE_ENV_PROXY === "1" || process.execArgv.includes("--use-env-proxy");
-  if (!useEnvProxy) return "direct";
+  if (!shouldUseEnvProxy()) return "direct";
   return [
     "env",
     process.env.http_proxy ?? "",
@@ -44,9 +51,7 @@ export function createUpstreamDispatcher(bodyTimeoutMs = UPSTREAM_BODY_TIMEOUT_M
     headersTimeout: 0,
     bodyTimeout: bodyTimeoutMs,
   };
-  const useEnvProxy =
-    process.env.NODE_USE_ENV_PROXY === "1" || process.execArgv.includes("--use-env-proxy");
-  return useEnvProxy ? new EnvHttpProxyAgent(options) : new Agent(options);
+  return shouldUseEnvProxy() ? new EnvHttpProxyAgent(options) : new Agent(options);
 }
 
 function getUpstreamDispatcher(): Dispatcher {
@@ -61,22 +66,6 @@ function getUpstreamDispatcher(): Dispatcher {
     void previous.close().catch(() => {});
   }
   return cachedDispatcher;
-}
-
-/** Detect Undici's body-silence timeout anywhere in an error's cause chain. */
-export function isUpstreamBodyTimeoutError(error: unknown): boolean {
-  let current: unknown = error;
-  const seen = new Set<unknown>();
-  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth++) {
-    if (seen.has(current)) break;
-    seen.add(current);
-    const candidate = current as { code?: unknown; name?: unknown; cause?: unknown };
-    if (candidate.code === "UND_ERR_BODY_TIMEOUT" || candidate.name === "BodyTimeoutError") {
-      return true;
-    }
-    current = candidate.cause;
-  }
-  return false;
 }
 
 /** Bound the wait for upstream headers without timing out the response body at 300s. */
