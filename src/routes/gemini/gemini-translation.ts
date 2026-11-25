@@ -16,6 +16,95 @@ import type {
 } from "./gemini-types.js";
 import { toolImageReader } from "./tool-images.js";
 
+// Bound total images forwarded to Copilot per Gemini request. Keeping only the
+// newest images avoids blowing up prompt tokens/payload size on long multimodal
+// loops while preserving older slots as explicit text placeholders.
+export const MAX_GEMINI_REQUEST_IMAGES = 5;
+
+function capTranslatedImages(messages: Message[], maxImages = MAX_GEMINI_REQUEST_IMAGES): void {
+  let kept = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!Array.isArray(message.content)) continue;
+    let changed = false;
+    const next = message.content.slice();
+    for (let p = next.length - 1; p >= 0; p--) {
+      if (next[p].type !== "image_url") continue;
+      if (kept < maxImages) {
+        kept++;
+        continue;
+      }
+      changed = true;
+      next[p] = {
+        type: "text",
+        text: `[Older image omitted: proxy request limit (${maxImages}).]`,
+      };
+    }
+    if (changed) message.content = next;
+  }
+}
+
+interface PendingToolImage {
+  contentIndex: number;
+  responseIndex: number;
+  part: unknown;
+}
+
+interface ToolSlotImages {
+  kept: ContentPart[];
+  omittedCount: number;
+}
+
+function hasInlineImageShape(part: unknown): boolean {
+  if (!part || typeof part !== "object" || !("inlineData" in part)) return false;
+  const { inlineData } = part as { inlineData?: unknown };
+  if (!inlineData || typeof inlineData !== "object" || !("mimeType" in inlineData) || !("data" in inlineData)) return false;
+  const { mimeType, data } = inlineData as { mimeType?: unknown; data?: unknown };
+  return (mimeType === "image/png" || mimeType === "image/jpeg" || mimeType === "image/gif" || mimeType === "image/webp")
+    && typeof data === "string" && data.length > 0;
+}
+
+function selectRecentToolImages(contents: GeminiContent[]): Map<string, ToolSlotImages> {
+  const pending: PendingToolImage[] = [];
+  for (let c = 0; c < contents.length; c++) {
+    const parts = contents[c].parts;
+    for (let p = 0; p < parts.length; p++) {
+      const part = parts[p];
+      if (!("functionResponse" in part) || !Array.isArray(part.functionResponse.parts)) continue;
+      for (const candidate of part.functionResponse.parts) {
+        pending.push({ contentIndex: c, responseIndex: p, part: candidate });
+      }
+    }
+  }
+  const readToolImage = toolImageReader();
+  const slots = new Map<string, ToolSlotImages>();
+  const ensureSlot = (key: string): ToolSlotImages => {
+    let slot = slots.get(key);
+    if (!slot) {
+      slot = { kept: [], omittedCount: 0 };
+      slots.set(key, slot);
+    }
+    return slot;
+  };
+  let remaining = MAX_GEMINI_REQUEST_IMAGES;
+  for (let i = pending.length - 1; i >= 0; i--) {
+    const entry = pending[i];
+    const key = `${entry.contentIndex}:${entry.responseIndex}`;
+    if (remaining <= 0) {
+      // Only note omitted entries with a plausible inline image shape.
+      if (hasInlineImageShape(entry.part)) {
+        ensureSlot(key).omittedCount++;
+      }
+      continue;
+    }
+    const image = readToolImage(entry.part);
+    if (!image) continue;
+    ensureSlot(key).kept.unshift(image);
+    remaining--;
+  }
+  return slots;
+}
+
 // === Request translation (Gemini -> OpenAI) ===
 
 // Copilot exposes these native Gemini thinking levels as Chat Completions effort.
@@ -48,7 +137,10 @@ export function translateGeminiToOpenAI(
 
   // Keep consecutive tool results together. Chat Completions expects every
   // tool message in the batch before any user message (including attachments).
-  const readToolImage = toolImageReader();
+  // Validate newest tool images first so stale tool screenshots cannot exhaust
+  // the byte/count budget before newer evidence is inspected.
+  const contents = request.contents ?? [];
+  const toolImagesBySlot = selectRecentToolImages(contents);
   let attachments: { resultIndex: number; images: ContentPart[] }[] = [];
   let resultCount = 0;
   let followUps: Message[] = [];
@@ -61,27 +153,32 @@ export function translateGeminiToOpenAI(
     resultCount = 0;
     followUps = [];
   };
-  for (const content of request.contents ?? []) {
-    const responses = content.parts.filter(
-      (part): part is { functionResponse: GeminiFunctionResponse } => "functionResponse" in part
-    );
+  for (let contentIndex = 0; contentIndex < contents.length; contentIndex++) {
+    const content = contents[contentIndex];
+    const responses: { responseIndex: number; functionResponse: GeminiFunctionResponse }[] = [];
+    for (let partIndex = 0; partIndex < content.parts.length; partIndex++) {
+      const part = content.parts[partIndex];
+      if ("functionResponse" in part) {
+        responses.push({ responseIndex: partIndex, functionResponse: part.functionResponse });
+      }
+    }
     if (responses.length === 0) {
       flushToolImagesAndInput();
       messages.push(...convertGeminiContentToOpenAI(content));
       continue;
     }
-    for (const { functionResponse } of responses) {
+    for (const { responseIndex, functionResponse } of responses) {
       const id = functionResponse.id || functionResponse.name;
       messages.push({ role: "tool", tool_call_id: id, content: JSON.stringify(functionResponse.response) });
       resultCount++;
-      if (!Array.isArray(functionResponse.parts)) continue;
-      const images: ContentPart[] = [];
-      for (const part of functionResponse.parts) {
-        const image = readToolImage(part);
-        if (!image) continue;
-        images.push(image);
+      const slot = toolImagesBySlot.get(`${contentIndex}:${responseIndex}`);
+      if (!slot) continue;
+      const parts: ContentPart[] = [];
+      for (let omitted = 0; omitted < slot.omittedCount; omitted++) {
+        parts.push({ type: "text", text: `[Older image omitted: proxy request limit (${MAX_GEMINI_REQUEST_IMAGES}).]` });
       }
-      if (images.length > 0) attachments.push({ resultIndex: resultCount, images });
+      parts.push(...slot.kept);
+      if (parts.length > 0) attachments.push({ resultIndex: resultCount, images: parts });
     }
     // Gemini may combine tool results and follow-up user input in one content.
     const userInput = content.parts.filter((part) => "text" in part || "inlineData" in part);
@@ -90,6 +187,7 @@ export function translateGeminiToOpenAI(
     }
   }
   flushToolImagesAndInput();
+  capTranslatedImages(messages);
 
   const payload: ChatCompletionsPayload = {
     model: modelId,
