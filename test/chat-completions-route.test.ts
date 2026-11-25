@@ -94,7 +94,40 @@ test("native chat/completions stream failure surfaces an error chunk", async (t)
 
   const lines = dataLines(await (await chat({ model: "gemini-4-carbon", stream: true })).text());
   assert.notEqual(lines.at(-1), "[DONE]");
-  assert.match(JSON.parse(lines.at(-1)!).error.message, /socket hang up/);
+  const last = JSON.parse(lines.at(-1)!);
+  assert.equal(last.error.type, "upstream_error");
+  assert.equal(last.error.code, null);
+  assert.match(last.error.message, /socket hang up/);
+});
+
+test("native chat/completions stream body timeout surfaces upstream_stream_timeout error code", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => {
+    const chunk = { id: "c1", object: "chat.completion.chunk", created: 1, model: "gemini-4-carbon", choices: [{ index: 0, delta: { content: "par" }, finish_reason: null }] };
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        const cause = Object.assign(new Error("Body Timeout Error"), {
+          name: "BodyTimeoutError",
+          code: "UND_ERR_BODY_TIMEOUT",
+        });
+        controller.error(new TypeError("terminated", { cause }));
+      },
+    });
+    return new Response(body, {
+      headers: { "content-type": "text/event-stream" },
+    });
+  });
+
+  const lines = dataLines(await (await chat({ model: "gemini-4-carbon", stream: true })).text());
+  assert.notEqual(lines.at(-1), "[DONE]");
+  assert.deepEqual(JSON.parse(lines.at(-1)!), {
+    error: {
+      message: "Upstream stream timed out waiting for data.",
+      type: "upstream_error",
+      code: "upstream_stream_timeout",
+    },
+  });
 });
 
 test("responses-only models: tool history, images and Copilot headers reach /responses", async (t) => {

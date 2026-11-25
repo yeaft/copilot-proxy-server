@@ -4,7 +4,12 @@ import type { AddressInfo } from "node:net";
 import { test, type TestContext } from "node:test";
 
 import { state } from "../src/lib/state.js";
-import { fetchModelUpstream } from "../src/lib/upstream-fetch.js";
+import {
+  UPSTREAM_BODY_TIMEOUT_MS,
+  createUpstreamDispatcher,
+  fetchModelUpstream,
+  isUpstreamBodyTimeoutError,
+} from "../src/lib/upstream-fetch.js";
 import { app } from "../src/server.js";
 
 async function startUpstream(t: TestContext, handler: RequestListener): Promise<URL> {
@@ -145,4 +150,55 @@ test("aborting a client request while awaiting headers cancels the upstream requ
   const response = await pending;
   assert.equal(response.status, 499);
   assert.ok(deadline.isCleared(), "aborting the client request must disarm the upstream headers deadline");
+});
+
+test("fetchModelUpstream attaches a long body-timeout dispatcher that clears slow SSE chunks", { timeout: 5000 }, async (t) => {
+  assert.equal(UPSTREAM_BODY_TIMEOUT_MS, 900_000);
+  const upstream = await startUpstream(t, (_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.flushHeaders();
+    const timer = setTimeout(() => res.end("data: slow-chunk\n\n"), 1250);
+    res.on("close", () => clearTimeout(timer));
+  });
+
+  // Short body-timeout dispatcher proves the dispatcher hook genuinely governs body silence.
+  const shortDispatcher = createUpstreamDispatcher(100);
+  t.after(() => shortDispatcher.close());
+  const shortResponse = await fetchModelUpstream(upstream.href, { dispatcher: shortDispatcher });
+  assert.equal(shortResponse.status, 200);
+  await assert.rejects(
+    shortResponse.text(),
+    (error: unknown) => {
+      assert.equal(isUpstreamBodyTimeoutError(error), true);
+      return true;
+    }
+  );
+
+  // Default dispatcher uses the extended 900s bodyTimeout and reads the same slow chunk cleanly.
+  let seenDispatcher: unknown;
+  const realFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (url: string, init: RequestInit & { dispatcher?: unknown }) => {
+    seenDispatcher = init?.dispatcher;
+    return realFetch(url, init);
+  });
+  const okResponse = await fetchModelUpstream(upstream.href, {});
+  assert.ok(seenDispatcher, "fetchModelUpstream must supply an explicit Undici dispatcher");
+  assert.equal(await okResponse.text(), "data: slow-chunk\n\n");
+});
+
+test("isUpstreamBodyTimeoutError matches direct, nested, and named body timeouts safely", () => {
+  const direct = Object.assign(new Error("Body Timeout Error"), { code: "UND_ERR_BODY_TIMEOUT" });
+  const wrapped = new TypeError("terminated", { cause: direct });
+  const deep = new Error("outer", { cause: wrapped });
+  const named = Object.assign(new Error("timed out"), { name: "BodyTimeoutError" });
+  const cyclic: { cause?: unknown } = {};
+  cyclic.cause = cyclic;
+
+  assert.equal(isUpstreamBodyTimeoutError(direct), true);
+  assert.equal(isUpstreamBodyTimeoutError(wrapped), true);
+  assert.equal(isUpstreamBodyTimeoutError(deep), true);
+  assert.equal(isUpstreamBodyTimeoutError(named), true);
+  assert.equal(isUpstreamBodyTimeoutError(new Error("socket hang up")), false);
+  assert.equal(isUpstreamBodyTimeoutError(cyclic), false);
+  assert.equal(isUpstreamBodyTimeoutError(null), false);
 });

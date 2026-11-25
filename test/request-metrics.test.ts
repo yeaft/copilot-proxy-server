@@ -188,6 +188,37 @@ test("streamed chat: complete, read failure, and missing terminal event", async 
   assert.deepEqual([cut.outcome, cut.status], ["incomplete", 200]);
 });
 
+test("streamed body timeout is recorded with outcome timeout", async (t) => {
+  const bodyTimeoutStream = (events: Array<string>) =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(event));
+          const cause = Object.assign(new Error("Body Timeout Error"), {
+            name: "BodyTimeoutError",
+            code: "UND_ERR_BODY_TIMEOUT",
+          });
+          controller.error(new TypeError("terminated", { cause }));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } }
+    );
+
+  const upstream = t.mock.method(globalThis, "fetch", async () =>
+    bodyTimeoutStream([chunk({ content: "par" })])
+  );
+  await (await chat({ model: "gemini-4-carbon", stream: true })).text();
+
+  upstream.mock.mockImplementation(async () =>
+    bodyTimeoutStream([responsesEvent({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "Hi" })])
+  );
+  await (await post("/v1/responses", { model: "gpt-6-luna", input: "hi", stream: true })).text().catch(() => {});
+
+  const [chatRow, responsesRow] = await waitForRows(2);
+  assert.deepEqual([chatRow.endpoint, chatRow.outcome, chatRow.status], ["openai", "timeout", 200]);
+  assert.deepEqual([responsesRow.endpoint, responsesRow.outcome, responsesRow.status], ["responses", "timeout", 200]);
+});
+
 test("responses-only models: an upstream failure inside the bridged stream is a stream error", async (t) => {
   t.mock.method(globalThis, "fetch", async () => sse([
     responsesEvent({ type: "response.created", response: { id: "r1", created_at: 1, status: "in_progress", output: [] } }),
