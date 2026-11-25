@@ -203,6 +203,10 @@ export async function observeModelRequest(
     if (!observation.isStreaming) observation.finish(outcomeForStatus(response.status), response.status);
     return response;
   } catch (error) {
+    if (c.req.raw.signal?.aborted === true) {
+      observation.finish("cancelled", CLIENT_CLOSED_STATUS);
+      return c.body(null, CLIENT_CLOSED_STATUS as never);
+    }
     const response = await forwardError(c, error);
     observation.finish(outcomeForError(error, observation.requestParsed), response.status);
     return response;
@@ -211,7 +215,8 @@ export async function observeModelRequest(
 
 /**
  * `streamSSE` that records the observation when the relay ends. Relay errors keep
- * propagating to Hono exactly as before.
+ * propagating to Hono exactly as before (except client disconnects, which already
+ * terminated the response stream and should not log spurious upstream errors).
  */
 export function streamObserved(
   c: Context,
@@ -225,6 +230,10 @@ export function streamObserved(
     try {
       await relay(stream);
     } catch (error) {
+      if (c.req.raw.signal?.aborted) {
+        observation.clientClosed();
+        return;
+      }
       threw = true;
       throw error;
     } finally {

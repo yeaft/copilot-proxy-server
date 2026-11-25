@@ -46,7 +46,9 @@ geminiRoutes.post(
     openAIPayload.stream = false;
 
     const clientHeaders = extractClientHeaders(c);
-    const response = await createChatCompletions(openAIPayload, clientHeaders);
+    const response = await createChatCompletions(openAIPayload, clientHeaders, {
+      signal: c.req.raw.signal,
+    });
 
     if (!isNonStreaming(response)) {
       return c.json(
@@ -85,7 +87,9 @@ geminiRoutes.post(
     openAIPayload.stream = true;
 
     const clientHeaders = extractClientHeaders(c);
-    const response = await createChatCompletions(openAIPayload, clientHeaders);
+    const response = await createChatCompletions(openAIPayload, clientHeaders, {
+      signal: c.req.raw.signal,
+    });
 
     if (isNonStreaming(response)) {
       // Fallback: return as non-streaming

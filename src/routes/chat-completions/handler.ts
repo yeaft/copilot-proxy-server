@@ -42,7 +42,7 @@ export async function handleChatCompletion(c: Context, observation: RequestObser
   logger.debug("OpenAI request payload:", () => JSON.stringify(payload).slice(-400));
 
   if (isDeepseekModel(payload.model)) {
-    return handleDeepseekChatCompletion(payload, observation);
+    return handleDeepseekChatCompletion(c, payload, observation);
   }
 
   // Models that support /responses — route through it for better capabilities
@@ -62,7 +62,10 @@ export async function handleChatCompletion(c: Context, observation: RequestObser
   }
 
   const clientHeaders = extractClientHeaders(c);
-  const response = await createChatCompletions(payload, clientHeaders, { forwardDone: true });
+  const response = await createChatCompletions(payload, clientHeaders, {
+    forwardDone: true,
+    signal: c.req.raw.signal,
+  });
 
   if (isNonStreaming(response)) {
     logger.debug("Non-streaming response");
@@ -108,6 +111,7 @@ async function handleViaResponsesApi(
   const response = await createResponses(responsesPayload, extractClientHeaders(c), {
     vision: hasImageInput(payload.messages),
     initiator: initiatorFor(payload.messages),
+    signal: c.req.raw.signal,
   });
 
   if (isResponsesResult(response)) {
@@ -154,6 +158,10 @@ function streamChatChunks(
         await stream.writeSSE({ data: chunk.data });
       }
     } catch (error) {
+      if (c.req.raw.signal?.aborted) {
+        observation.clientClosed();
+        return;
+      }
       observation.streamReadFailed();
       logger.error("Chat completions stream failed:", error);
       await stream.writeSSE({
@@ -170,6 +178,7 @@ function streamChatChunks(
 }
 
 async function handleDeepseekChatCompletion(
+  c: Context,
   payload: ChatCompletionsPayload,
   observation: RequestObservation
 ) {
@@ -177,7 +186,8 @@ async function handleDeepseekChatCompletion(
   observation.endpoint = "deepseek-chat-completions";
   const response = await createDeepseekCompletion(
     "/v1/chat/completions",
-    payload as unknown as Record<string, unknown>
+    payload as unknown as Record<string, unknown>,
+    { signal: c.req.raw.signal }
   );
 
   // The body is relayed untouched, so usage is unknown and timing ends at the upstream headers.

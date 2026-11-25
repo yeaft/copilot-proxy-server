@@ -21,6 +21,11 @@ import { toolImageReader } from "./tool-images.js";
 // loops while preserving older slots as explicit text placeholders.
 export const MAX_GEMINI_REQUEST_IMAGES = 5;
 
+function omittedImageNotice(count: number, maxImages = MAX_GEMINI_REQUEST_IMAGES): string {
+  const prefix = count === 1 ? "Older image omitted" : `${count} older images omitted`;
+  return `[${prefix}: proxy request limit (${maxImages}; newest ${maxImages} kept). Record findings from the currently visible images before opening another batch; do not reopen images you already inspected.]`;
+}
+
 function capTranslatedImages(messages: Message[], maxImages = MAX_GEMINI_REQUEST_IMAGES): void {
   let kept = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -37,7 +42,7 @@ function capTranslatedImages(messages: Message[], maxImages = MAX_GEMINI_REQUEST
       changed = true;
       next[p] = {
         type: "text",
-        text: `[Older image omitted: proxy request limit (${maxImages}).]`,
+        text: omittedImageNotice(1, maxImages),
       };
     }
     if (changed) message.content = next;
@@ -175,10 +180,8 @@ export function translateGeminiToOpenAI(
       const slot = toolImagesBySlot.get(`${contentIndex}:${responseIndex}`);
       if (!slot) continue;
       const parts: ContentPart[] = [];
-      if (slot.omittedCount === 1) {
-        parts.push({ type: "text", text: `[Older image omitted: proxy request limit (${MAX_GEMINI_REQUEST_IMAGES}).]` });
-      } else if (slot.omittedCount > 1) {
-        parts.push({ type: "text", text: `[${slot.omittedCount} older images omitted: proxy request limit (${MAX_GEMINI_REQUEST_IMAGES}).]` });
+      if (slot.omittedCount > 0) {
+        parts.push({ type: "text", text: omittedImageNotice(slot.omittedCount, MAX_GEMINI_REQUEST_IMAGES) });
       }
       parts.push(...slot.kept);
       if (parts.length > 0) attachments.push({ resultIndex: resultCount, images: parts });

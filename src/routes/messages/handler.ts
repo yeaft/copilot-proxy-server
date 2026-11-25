@@ -37,14 +37,16 @@ export async function handleMessagesCompletion(c: Context, observation: RequestO
 
   // Route DeepSeek models directly (DeepSeek uses Anthropic-compatible API)
   if (isDeepseekModel(anthropicPayload.model)) {
-    return handleDeepseekCompletion(anthropicPayload, observation);
+    return handleDeepseekCompletion(c, anthropicPayload, observation);
   }
 
   const openAIPayload = translateToOpenAI(anthropicPayload);
   logger.debug("Translated OpenAI payload:", () => JSON.stringify(openAIPayload));
 
   const clientHeaders = extractClientHeaders(c);
-  const response = await createChatCompletions(openAIPayload, clientHeaders);
+  const response = await createChatCompletions(openAIPayload, clientHeaders, {
+    signal: c.req.raw.signal,
+  });
 
   if (isNonStreaming(response)) {
     logger.debug("Non-streaming response from Copilot");
@@ -85,6 +87,7 @@ export async function handleMessagesCompletion(c: Context, observation: RequestO
  * as-is without any Anthropic ↔ OpenAI translation.
  */
 async function handleDeepseekCompletion(
+  c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   observation: RequestObservation
 ) {
@@ -92,7 +95,8 @@ async function handleDeepseekCompletion(
   observation.endpoint = "deepseek-messages";
   const response = await createDeepseekCompletion(
     "/v1/messages",
-    anthropicPayload as unknown as Record<string, unknown>
+    anthropicPayload as unknown as Record<string, unknown>,
+    { signal: c.req.raw.signal }
   );
 
   // The body is relayed untouched, so usage is unknown and timing ends at the upstream headers.

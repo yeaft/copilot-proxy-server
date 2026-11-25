@@ -112,3 +112,37 @@ test("receiving headers disarms the timeout even when the response body has not 
   (await finish.promise)();
   assert.equal(await response.text(), "data: OK\n\n");
 });
+
+test("aborting a client request while awaiting headers cancels the upstream request and clears the deadline", { timeout: 5000 }, async (t) => {
+  const received = Promise.withResolvers<string>();
+  const disconnected = Promise.withResolvers<void>();
+  const upstream = await startUpstream(t, (req, res) => {
+    req.resume();
+    received.resolve(req.url!);
+    res.on("close", disconnected.resolve);
+  });
+  const { copilotToken } = state;
+  t.after(() => Object.assign(state, { copilotToken }));
+  state.copilotToken = "test-copilot-token";
+
+  const realFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (url: string, init: RequestInit) =>
+    realFetch(new URL(new URL(url).pathname, upstream), init)
+  );
+  const deadline = controlHeadersDeadline(t);
+  const clientAbort = new AbortController();
+
+  const pending = app.request("/v1/models/gemini-4-neon:streamGenerateContent", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "Reply OK." }] }] }),
+    signal: clientAbort.signal,
+  });
+  assert.equal(await received.promise, "/chat/completions");
+  clientAbort.abort();
+
+  await disconnected.promise;
+  const response = await pending;
+  assert.equal(response.status, 499);
+  assert.ok(deadline.isCleared(), "aborting the client request must disarm the upstream headers deadline");
+});
