@@ -369,3 +369,147 @@ test("Gemini countTokens estimates direct and tool images independently of base6
   }
   assert.equal(upstream.mock.callCount(), 0);
 });
+
+test("Gemini caps forwarded images to the newest 5 across uploads and tool results and replaces older images with text", async (t) => {
+  const makePng = (seed: number) => {
+    const bytes = Buffer.from(png, "base64");
+    const chunk = Buffer.alloc(16);
+    chunk.writeUInt32BE(4);
+    chunk.write("vpAg", 4);
+    chunk.writeUInt32BE(seed, 8);
+    chunk.writeUInt32BE(crc32(chunk.subarray(4, 12)), 12);
+    const data = Buffer.concat([bytes.subarray(0, 33), chunk, bytes.subarray(33)]).toString("base64");
+    return {
+      inlineData: { mimeType: "image/png", data },
+      part: { type: "image_url" as const, image_url: { url: `data:image/png;base64,${data}` } },
+    };
+  };
+  const imgs = Array.from({ length: 8 }, (_, index) => makePng(index + 1));
+  let forwardedPayload: ChatCompletionsPayload | undefined;
+  const upstream = t.mock.method(globalThis, "fetch", async (_input: string, init?: RequestInit) => {
+    forwardedPayload = JSON.parse(String(init?.body)) as ChatCompletionsPayload;
+    return Response.json({ choices: [{ index: 0, message: { content: "Capped OK" }, finish_reason: "stop" }] });
+  });
+
+  const response = await geminiRequest("v1beta", "generateContent", { "x-goog-api-key": proxyKey }, {
+    contents: [
+      { role: "user", parts: [{ text: "Uploads" }, imgs[0], imgs[1], imgs[2]] },
+      { role: "model", parts: [{ functionCall: { id: "c1", name: "ViewImage", args: { file_path: "a.png" } } }] },
+      { role: "user", parts: [{ functionResponse: { id: "c1", name: "ViewImage", response: { output: "a" }, parts: [imgs[3], imgs[4]] } }] },
+      { role: "model", parts: [{ functionCall: { id: "c2", name: "ViewImage", args: { file_path: "b.png" } } }] },
+      { role: "user", parts: [{ functionResponse: { id: "c2", name: "ViewImage", response: { output: "b" }, parts: [imgs[5], imgs[6]] } }, { text: "Latest upload" }, imgs[7]] },
+    ],
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(upstream.mock.callCount(), 1);
+  assert.ok(forwardedPayload);
+  const sentImages = forwardedPayload.messages.flatMap((message) =>
+    Array.isArray(message.content)
+      ? message.content.filter((part) => part.type === "image_url")
+      : []
+  );
+  assert.deepEqual(sentImages, imgs.slice(3).map((item) => item.part));
+  // The three older uploads were replaced with explicit omission text.
+  const firstUserContent = forwardedPayload.messages[0].content;
+  assert.ok(Array.isArray(firstUserContent));
+  assert.equal(
+    firstUserContent.filter((part) => part.type === "text" && part.text.includes("Older image omitted: proxy request limit (5)")).length,
+    3
+  );
+});
+
+test("Gemini tool image cap validates newest tool images first so old oversized images cannot starve newer ones", async (t) => {
+  const bytes = Buffer.from(png, "base64");
+  const makeSizedPng = (size: number, tag: number) => {
+    const chunk = Buffer.alloc(size - bytes.length);
+    chunk.writeUInt32BE(chunk.length - 12);
+    chunk.write("vpAg", 4);
+    chunk.writeUInt32BE(tag, 8);
+    chunk.writeUInt32BE(crc32(chunk.subarray(4, -4)), chunk.length - 4);
+    const data = Buffer.concat([bytes.subarray(0, 33), chunk, bytes.subarray(33)]).toString("base64");
+    return {
+      inlineData: { mimeType: "image/png", data },
+      part: { type: "image_url" as const, image_url: { url: `data:image/png;base64,${data}` } },
+    };
+  };
+  const mib = 1024 * 1024;
+  // 4 older 9 MiB images (> 32 MiB byte budget if scanned oldest-first) plus 5 small newer images.
+  const oldBig = Array.from({ length: 4 }, (_, i) => makeSizedPng(9 * mib, 100 + i));
+  const newer = Array.from({ length: 5 }, (_, i) => makeSizedPng(1024, 200 + i));
+  let forwardedPayload: ChatCompletionsPayload | undefined;
+  t.mock.method(globalThis, "fetch", async (_input: string, init?: RequestInit) => {
+    forwardedPayload = JSON.parse(String(init?.body)) as ChatCompletionsPayload;
+    return Response.json({ choices: [{ index: 0, message: { content: "Fresh OK" }, finish_reason: "stop" }] });
+  });
+
+  const response = await geminiRequest("v1", "generateContent", { "x-goog-api-key": proxyKey }, {
+    contents: [
+      { role: "user", parts: [{ text: "Inspect all" }] },
+      { role: "model", parts: [{ functionCall: { id: "old", name: "ViewImage", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { id: "old", name: "ViewImage", response: { output: "old" }, parts: oldBig } }] },
+      { role: "model", parts: [{ functionCall: { id: "new", name: "ViewImage", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { id: "new", name: "ViewImage", response: { output: "new" }, parts: newer } }] },
+    ],
+  });
+
+  assert.equal(response.status, 200);
+  assert.ok(forwardedPayload);
+  const sentImages = forwardedPayload.messages.flatMap((message) =>
+    Array.isArray(message.content)
+      ? message.content.filter((part) => part.type === "image_url")
+      : []
+  );
+  assert.deepEqual(sentImages, newer.map((item) => item.part));
+  const serialized = JSON.stringify(forwardedPayload.messages);
+  assert.match(serialized, /4 older images omitted: proxy request limit \(5\)/);
+});
+
+test("Gemini tool image cap skips corrupt newer images without starving valid older ones and bounds countTokens at 5", async (t) => {
+  const bytes = Buffer.from(png, "base64");
+  const makePng = (seed: number) => {
+    const chunk = Buffer.alloc(16);
+    chunk.writeUInt32BE(4);
+    chunk.write("vpAg", 4);
+    chunk.writeUInt32BE(seed, 8);
+    chunk.writeUInt32BE(crc32(chunk.subarray(4, 12)), 12);
+    const data = Buffer.concat([bytes.subarray(0, 33), chunk, bytes.subarray(33)]).toString("base64");
+    return {
+      inlineData: { mimeType: "image/png", data },
+      part: { type: "image_url" as const, image_url: { url: `data:image/png;base64,${data}` } },
+    };
+  };
+  const imgs = Array.from({ length: 6 }, (_, i) => makePng(300 + i));
+  const corrupt = { inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } };
+  let forwardedPayload: ChatCompletionsPayload | undefined;
+  const upstream = t.mock.method(globalThis, "fetch", async (_input: string, init?: RequestInit) => {
+    forwardedPayload = JSON.parse(String(init?.body)) as ChatCompletionsPayload;
+    return Response.json({ choices: [{ index: 0, message: { content: "OK" }, finish_reason: "stop" }] });
+  });
+
+  // 6 valid images with a corrupt image inside the newest 5 -> newest 5 VALID images (imgs[1..5]) should survive.
+  const response = await geminiRequest("v1beta", "generateContent", { "x-goog-api-key": proxyKey }, {
+    contents: [
+      { role: "user", parts: [{ text: "Inspect" }] },
+      { role: "model", parts: [{ functionCall: { id: "c1", name: "ViewImage", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { id: "c1", name: "ViewImage", response: { output: "ok" }, parts: [imgs[0], imgs[1], imgs[2], corrupt, imgs[3], imgs[4], imgs[5]] } }] },
+    ],
+  });
+  assert.equal(response.status, 200);
+  assert.equal(upstream.mock.callCount(), 1);
+  assert.ok(forwardedPayload);
+  const sentImages = forwardedPayload.messages.flatMap((message) =>
+    Array.isArray(message.content) ? message.content.filter((part) => part.type === "image_url") : []
+  );
+  assert.deepEqual(sentImages, imgs.slice(1).map((item) => item.part));
+
+  // countTokens caps image tokens at 5 images.
+  const fiveCount = await (await geminiRequest("v1beta", "countTokens", { "x-goog-api-key": proxyKey }, {
+    contents: [{ role: "user", parts: [{ text: "Count" }, ...imgs.slice(0, 5)] }],
+  })).json();
+  const sixCount = await (await geminiRequest("v1beta", "countTokens", { "x-goog-api-key": proxyKey }, {
+    contents: [{ role: "user", parts: [{ text: "Count" }, ...imgs] }],
+  })).json();
+  assert.ok(sixCount.totalTokens - fiveCount.totalTokens < 64, "6th image should add placeholder text tokens, not +256 image tokens");
+  assert.equal(upstream.mock.callCount(), 1);
+});
